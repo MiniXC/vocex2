@@ -112,23 +112,29 @@ def fill_sequence(arr):
 
 def get_silences(get_speech_timestamps, model, audio, mel_len):
     with torch.no_grad():
+        audio = torch.cat(
+            [torch.zeros(1000), torch.tensor(audio), torch.zeros(1000)], dim=0
+        )
         vad_result = get_speech_timestamps(audio, model, sampling_rate=16000)
-        vad_factor = mel_len / (len(audio) - 16000)
+        vad_factor = mel_len / (len(audio) - 2000)
         vad_result = [
             (
-                int(np.ceil((v["start"] - 8000) * vad_factor)),
-                int(np.ceil((v["end"] - 8000) * vad_factor)),
+                int(np.ceil((v["start"] - 1000) * vad_factor)),
+                int(np.ceil((v["end"] - 1000) * vad_factor)),
             )
             for v in vad_result
         ]
         silences = []
+        frame_pad = 2
         if len(vad_result) > 0:
             if vad_result[0][0] != 0:
-                silences.append((0, max(vad_result[0][0], 0)))
+                silences.append((0, max(vad_result[0][0] + frame_pad, 0)))
             for i in range(len(vad_result) - 1):
-                silences.append((vad_result[i][1], vad_result[i + 1][0]))
+                silences.append(
+                    (vad_result[i][1] - frame_pad, vad_result[i + 1][0] + frame_pad)
+                )
             if vad_result[-1][1] <= mel_len:
-                silences.append((vad_result[-1][1], mel_len))
+                silences.append((vad_result[-1][1] - frame_pad, mel_len + frame_pad))
         return silences
 
 
@@ -279,8 +285,8 @@ class VocexCollator(nn.Module):
                 for i in range(current_idx, len(new_phone_start_end_idxs)):
                     phone_start, phone_end = new_phone_start_end_idxs[i]
                     if (
-                        silence_start < phone_start
-                        and silence_end > phone_end
+                        silence_start <= phone_start
+                        and silence_end >= phone_end
                         and new_phones[i] == "☐"
                     ):
                         if i > 0:
@@ -324,12 +330,22 @@ class VocexCollator(nn.Module):
             from matplotlib import pyplot as plt
 
             trimmed_mel = mel[:, :mel_len]
-            fig, ax = plt.subplots()
-            ax.imshow(trimmed_mel)
+            fig, ax = plt.subplots(figsize=(40, 20))
+            ax.imshow(torch.flip(trimmed_mel, dims=(0,)).numpy())
             for phone, (start, end) in zip(new_phones, new_phone_start_end_idxs):
-                ax.axvspan(start, end, color="red", alpha=0.5)
+                # add a line for each phone
+                ax.axvline(start, color="r")
+                ax.axvline(end, color="r")
+                ax.text(
+                    (start + end) / 2,
+                    10,
+                    phone,
+                    horizontalalignment="center",
+                    verticalalignment="center",
+                )
             for start, end in silences:
-                ax.axvspan(start, end, color="blue", alpha=0.5)
+                ax.axvline(start, color="b")
+                ax.axvline(end, color="b")
             plt.savefig("test.png")
 
             raise
