@@ -155,8 +155,6 @@ class WhisperAudioEncoder(nn.Module):
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
 
-        print(x.shape, self.positional_embedding.shape)
-
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
         x = (x + self.positional_embedding).to(x.dtype)
 
@@ -206,7 +204,7 @@ class WhisperAudioEncoder(nn.Module):
             n_layer=dims.n_audio_layer,
         )
         model = cls(args)
-        model.load_state_dict(whisper_model.state_dict())
+        model.load_state_dict(whisper_model.state_dict(), strict=False)
         return model
 
     @property

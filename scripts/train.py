@@ -10,10 +10,11 @@ sys.path.append(".")  # add root of project to path
 # torch & hf
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 from transformers import get_linear_schedule_with_warmup, HfArgumentParser
 from datasets import load_dataset
+import pandas as pd
 
 # logging & etc
 from torchinfo import summary
@@ -39,6 +40,18 @@ from model.whisper_encoder import WhisperAudioEncoder
 from collators import get_collator
 
 MODEL_CLASS = WhisperAudioEncoder
+
+
+class DatasetFromDataframe(Dataset):
+    def __init__(self, df):
+        self.df = df
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        return row
+
+    def __len__(self):
+        return len(self.df)
 
 
 def train_epoch(epoch):
@@ -194,15 +207,29 @@ def main():
     # dataset
     console_rule("Dataset")
 
-    console_print(f"[green]dataset[/green]: {training_args.dataset}")
-    console_print(f"[green]train_split[/green]: {training_args.train_split}")
-    console_print(f"[green]val_split[/green]: {training_args.val_split}")
+    data = pd.read_json(
+        path_or_buf=Path(training_args.libriheavy_path)
+        / "libriheavy_cuts_small.jsonl.gz",
+        lines=True,
+    )
+    # remove all rows with "duration" >= 30
+    len_pre = len(data)
+    data = data[data["duration"] < 30]
+    len_post = len(data)
+    console_print(
+        f"[green]removed rows due to duration >= 30s[/green]: {len_pre-len_post} ({(len_pre-len_post)/len_pre*100:.2f}%)"
+    )
+    # move every 100th file to val
+    val = data.iloc[::100]
+    train = data.drop(val.index)
+    collator_args.libriheavy_path = training_args.libriheavy_path
 
-    train_ds = load_dataset(training_args.dataset, split=training_args.train_split)
-    val_ds = load_dataset(training_args.dataset, split=training_args.val_split)
+    console_print(f"[green]dataset path[/green]: {training_args.libriheavy_path}")
+    console_print(f"[green]train_split size[/green]: {len(train)}")
+    console_print(f"[green]val_split size[/green]: {len(val)}")
 
-    console_print(f"[green]train[/green]: {len(train_ds)}")
-    console_print(f"[green]val[/green]: {len(val_ds)}")
+    train_ds = DatasetFromDataframe(train)
+    val_ds = DatasetFromDataframe(val)
 
     # collator
     collator = get_collator(collator_args)
