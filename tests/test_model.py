@@ -1,6 +1,8 @@
-import torch
+import sys
 
-from model.simple_mlp import SimpleMLP
+sys.path.append(".")
+
+from model.whisper_encoder import SimpleMLP
 from configs.args import ModelArgs
 
 model = SimpleMLP(ModelArgs())

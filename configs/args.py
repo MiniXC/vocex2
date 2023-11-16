@@ -9,12 +9,12 @@ class TrainingArgs:
     gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
     output_path: str = "outputs"
+    from_whisper: str = None
     run_name: str = None
     wandb_mode: str = "offline"
     wandb_project: str = None
     wandb_dir: str = "wandb"
-    train_split: str = "train"
-    val_split: str = "test"
+    libriheavy_size: str = "small"
     n_steps: int = 10000
     batch_size: int = 32
     seed: int = 0
@@ -32,14 +32,15 @@ class TrainingArgs:
 
 @dataclass
 class CollatorArgs:
-    normalize: bool = True
-    onehot: bool = True
+    speaker_model: str = "titanet_large"
     name: str = "default"
 
 
 @dataclass
 class ModelArgs:
-    n_layers: int = 4
-    hidden_dim: int = 512
-    dropout: float = 0.1
-    residual: bool = True
+    # default matches "tiny" version of whisper
+    n_mels: int = 80
+    n_ctx: int = 1500
+    n_state: int = 384
+    n_head: int = 6
+    n_layer: int = 4

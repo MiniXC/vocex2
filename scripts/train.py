@@ -35,10 +35,10 @@ console = Console()
 from configs.args import TrainingArgs, ModelArgs, CollatorArgs
 from configs.validation import validate_args
 from util.remote import wandb_update_config, wandb_init, push_to_hub
-from model.simple_mlp import SimpleMLP
+from model.whisper_encoder import WhisperAudioEncoder
 from collators import get_collator
 
-MODEL_CLASS = SimpleMLP
+MODEL_CLASS = WhisperAudioEncoder
 
 
 def train_epoch(epoch):
@@ -184,7 +184,10 @@ def main():
     console_print(f"[green]process_index[/green]: {accelerator.process_index}")
 
     # model
-    model = MODEL_CLASS(model_args)
+    if training_args.from_whisper is not None:
+        model = MODEL_CLASS.init_from_whisper(training_args.from_whisper)
+    else:
+        model = MODEL_CLASS(model_args)
     console_rule("Model")
     print_and_draw_model()
 

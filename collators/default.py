@@ -4,8 +4,22 @@ import numpy as np
 
 from configs.args import CollatorArgs
 
+import nemo.collections.asr as nemo_asr
 
-class MNISTCollator(nn.Module):
+import torchaudio
+
+
+embs1 = speaker_model.get_embedding("figures/docs_diff_villefort.wav")
+
+print(
+    torch.abs(embs1 - embs2).mean(),
+    torch.abs(embs1 - embs2).max(),
+    torch.abs(embs1).max(),
+    torch.abs(embs2).max(),
+)
+
+
+class VocexCollator(nn.Module):
     def __init__(
         self,
         args: CollatorArgs,
@@ -13,26 +27,9 @@ class MNISTCollator(nn.Module):
         super().__init__()
 
         self.args = args
+        self.speaker_model = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
+            model_name="titanet_large"
+        )
 
     def __call__(self, batch):
-        if self.args.normalize:
-            x = torch.tensor(
-                np.array([np.asarray(b["image"]).flatten() / 255 for b in batch])
-            ).to(torch.float32)
-        else:
-            x = torch.tensor(
-                np.array([np.asarray(b["image"]).flatten() for b in batch])
-            ).to(torch.float32)
-        y = torch.tensor([b["label"] for b in batch]).long()
-        if self.args.onehot:
-            y_onehot = torch.nn.functional.one_hot(y, num_classes=10).to(torch.float32)
-            return {
-                "image": x,
-                "target": y,
-                "target_onehot": y_onehot,
-            }
-        else:
-            return {
-                "image": x,
-                "target": y,
-            }
+        speaker_model.get

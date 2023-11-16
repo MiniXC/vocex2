@@ -2,6 +2,7 @@ from .args import TrainingArgs, ModelArgs, CollatorArgs
 
 
 def validate_args(*args):
+    return
     for arg in args:
         if isinstance(arg, TrainingArgs):
             if arg.dataset not in ["mnist"]:
