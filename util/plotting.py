@@ -1,15 +1,30 @@
 import matplotlib.pyplot as plt
+import torch
 
 from configs.args import TrainingArgs
 
 
 def plot_first_batch(batch, args: TrainingArgs):
-    fig, axes = plt.subplots(
-        nrows=1, ncols=args.batch_size, figsize=(3 * args.batch_size, 3)
-    )
-    for i, ax in enumerate(axes.flatten()):
-        ax.imshow(batch["image"][i].view(28, 28), cmap="gray")
-        ax.set_title(batch["target"][i].item())
-        ax.axis("off")
-    plt.tight_layout()
-    return fig
+    for i in range(len(batch)):
+        mel = batch["mel"][i]
+        phone_spans = batch["phone_spans"][i]
+        silences = batch["silences"][i]
+        mel_len = batch["mel_len"][i]
+        trimmed_mel = mel[:, :mel_len]
+        fig, ax = plt.subplots(figsize=(40, 20))
+        ax.imshow(torch.flip(trimmed_mel, dims=(0,)).numpy())
+        for phone, (start, end) in phone_spans:
+            # add a line for each phone
+            ax.axvline(start, color="r")
+            ax.axvline(end, color="r")
+            ax.text(
+                (start + end) / 2,
+                10,
+                phone,
+                horizontalalignment="center",
+                verticalalignment="center",
+            )
+        for start, end in silences:
+            ax.axvline(start, color="b")
+            ax.axvline(end, color="b")
+        plt.savefig(f"figures/batch_{i}.png")

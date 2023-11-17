@@ -17,7 +17,7 @@ class TrainingArgs:
     libriheavy_size: str = "small"
     libriheavy_path: str = "/dev/shm/libriheavy"
     n_steps: int = 10000
-    batch_size: int = 32
+    batch_size: int = 8
     seed: int = 0
     dataset: str = "mnist"
     log_every_n_steps: int = 100
@@ -45,3 +45,5 @@ class ModelArgs:
     n_state: int = 384
     n_head: int = 6
     n_layer: int = 4
+    n_postnet_layers: int = 4
+    n_phones: int = 403

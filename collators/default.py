@@ -1,8 +1,10 @@
+import re
+from pathlib import Path
+from subprocess import run, CalledProcessError
+
 import torch
 from torch import nn
 import numpy as np
-from pathlib import Path
-from subprocess import run, CalledProcessError
 
 from configs.args import CollatorArgs
 
@@ -11,6 +13,7 @@ import soundfile as sf
 import librosa
 from phonemizer import phonemize
 from phonemizer.separator import Separator
+from phonemizer.punctuation import Punctuation
 
 # for aligning phonemized and phone_ids
 from Bio import pairwise2
@@ -158,7 +161,11 @@ class VocexCollator(nn.Module):
             "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
         )
         self.id2phone = self.phone_processor.tokenizer.decoder
+        self.punct_symbols = ';:,.!"?()-'
+        for symbol in self.punct_symbols:
+            self.id2phone[len(self.id2phone)] = symbol
         self.id2phone[len(self.id2phone)] = "☐"
+        self.phone2id = {v: k for k, v in self.id2phone.items()}
         model, utils = torch.hub.load(
             repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False
         )
@@ -173,6 +180,16 @@ class VocexCollator(nn.Module):
         self.vad_model = model
 
     def __call__(self, batch):
+        result = {
+            "mel": [],
+            "mel_len": [],
+            "speaker_emb": [],
+            "phone_ids": [],
+            "phone_spans": [],
+            "transcript": [],
+            "transcript_phonemized": [],
+            "silences": [],
+        }
         for item in batch:
             file_path = self.libriheavy_path / item["recording"]["sources"][0]["source"]
             audio = load_audio(
@@ -209,18 +226,51 @@ class VocexCollator(nn.Module):
             ctc_phones = " ".join(
                 [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"]
             )
+            punct = Punctuation(self.punct_symbols)
+            # text = punct.remove(text)
             phonemized = (
                 "☐ "
                 + phonemize(
                     text,
-                    separator=Separator(phone=" ", word="☐ "),
+                    separator=Separator(phone=" ", word=" ☐ "),
                     backend="espeak",
                     language="en-us",
+                    preserve_punctuation=True,
+                    punctuation_marks=self.punct_symbols,
                 )
                 + " ☐"
             )
+            # if punctuations are not separated by spaces, add spaces
+            for symbol in self.punct_symbols:
+                phonemized = phonemized.replace(symbol, f" {symbol} ")
+            # replace any spaces more than 1 with 1 space
+            phonemized = re.sub(r"\s{2,}", " ", phonemized)
+            # remove 2 consecutive punctuations, or space and punctuation
+            phonemized_temp = []
+            phonemized_split = phonemized.split(" ")
+            print(phonemized_split)
+            for i in range(len(phonemized_split) - 1):
+                if (
+                    phonemized_split[i] == "☐"
+                    and phonemized_split[i + 1] in self.punct_symbols
+                ):
+                    continue
+                elif (
+                    phonemized_split[i] in self.punct_symbols
+                    and phonemized_split[i + 1] == "☐"
+                ):
+                    phonemized_split[i + 1] = phonemized_split[i]
+                else:
+                    phonemized_temp.append(phonemized_split[i])
+            phonemized_temp.append(phonemized_split[-1])
+            phonemized = " ".join(phonemized_temp)
+            phonemized_ids = [
+                self.phone2id[phone]
+                for phone in phonemized.split(" ")
+                if len(phone) > 0
+            ]
             # align phonemized and phone_ids
-            alignments = pairwise2.align.globalxx(ctc_phones, phonemized)
+            alignments = pairwise2.align.globalxx(ctc_phones, phonemized, gap_char="+")
             zipped = list(zip(alignments[0].seqA, alignments[0].seqB))
             current_phone_idx = 0
             new_phones = []
@@ -228,9 +278,10 @@ class VocexCollator(nn.Module):
             last_phone = None
             last_was_silence = False
             current_phone = self.id2phone[phone_ids[current_phone_idx]]
+            silence_and_punct = "☐" + self.punct_symbols
             for ctc, phone in zipped:
-                if ctc == "-" and phone == "☐":
-                    new_phones.append("☐")
+                if ctc == "+" and phone in silence_and_punct:
+                    new_phones.append(phone)
                     if last_phone is None:
                         new_phone_start_end_idxs.append((0, 1))
                         last_was_silence = True
@@ -267,13 +318,14 @@ class VocexCollator(nn.Module):
                 else:
                     pass
             # add final silence
-            new_phones.append("☐")
-            new_phone_start_end_idxs.append(
-                (
-                    phone_start_end_idxs[current_phone_idx - 1][1],
-                    phone_start_end_idxs[current_phone_idx - 1][1] + 1,
+            if new_phones[-1] not in silence_and_punct:
+                new_phones.append("☐")
+                new_phone_start_end_idxs.append(
+                    (
+                        phone_start_end_idxs[current_phone_idx - 1][1],
+                        phone_start_end_idxs[current_phone_idx - 1][1] + 1,
+                    )
                 )
-            )
             silences = get_silences(
                 self.get_speech_timestamps, self.vad_model, audio, mel_len
             )
@@ -287,7 +339,7 @@ class VocexCollator(nn.Module):
                     if (
                         silence_start <= phone_start
                         and silence_end >= phone_end
-                        and new_phones[i] == "☐"
+                        and new_phones[i] in silence_and_punct
                     ):
                         if i > 0:
                             phone_before_sil = new_phone_start_end_idxs[i - 1]
@@ -300,7 +352,7 @@ class VocexCollator(nn.Module):
                                 silence_start = phone_before_sil[0] + 2
                                 new_phone_start_end_idxs[i - 1] = (
                                     phone_before_sil[0],
-                                    silence_start - 1,
+                                    silence_start,
                                 )
                         if i < len(new_phone_start_end_idxs) - 1:
                             phone_after_sil = new_phone_start_end_idxs[i + 1]
@@ -312,40 +364,65 @@ class VocexCollator(nn.Module):
                             else:
                                 silence_end = phone_after_sil[1] - 2
                                 new_phone_start_end_idxs[i + 1] = (
-                                    silence_end + 1,
+                                    silence_end,
                                     phone_after_sil[1],
                                 )
                         new_phone_start_end_idxs[i] = (silence_start, silence_end)
                         current_idx = i + 1
                         break
-            print(
-                list(
-                    zip(
-                        new_phones,
-                        [(start, end) for start, end in new_phone_start_end_idxs],
-                    )
+
+            phone_spans = list(
+                zip(
+                    new_phones,
+                    [(start, end) for start, end in new_phone_start_end_idxs],
                 )
             )
-            # save mel as image, with phone_ids and silences
-            from matplotlib import pyplot as plt
-
-            trimmed_mel = mel[:, :mel_len]
-            fig, ax = plt.subplots(figsize=(40, 20))
-            ax.imshow(torch.flip(trimmed_mel, dims=(0,)).numpy())
-            for phone, (start, end) in zip(new_phones, new_phone_start_end_idxs):
-                # add a line for each phone
-                ax.axvline(start, color="r")
-                ax.axvline(end, color="r")
-                ax.text(
-                    (start + end) / 2,
-                    10,
-                    phone,
-                    horizontalalignment="center",
-                    verticalalignment="center",
+            if phone_spans[0][1][0] < 0:
+                phone_spans[0] = (
+                    phone_spans[0][0],
+                    (0, phone_spans[0][1][1]),
                 )
-            for start, end in silences:
-                ax.axvline(start, color="b")
-                ax.axvline(end, color="b")
-            plt.savefig("test.png")
+            if phone_spans[-1][1][1] > mel_len:
+                phone_spans[-1] = (
+                    phone_spans[-1][0],
+                    (phone_spans[-1][1][0], mel_len),
+                )
+            # remove duplicate silences
+            phone_spans_temp = []
+            for i in range(len(phone_spans) - 1):
+                if (
+                    phone_spans[i][0] in silence_and_punct
+                    and phone_spans[i + 1][0] in silence_and_punct
+                ):
+                    continue
+                else:
+                    phone_spans_temp.append(phone_spans[i])
+            phone_spans_temp.append(phone_spans[-1])
+            phone_spans = phone_spans_temp
 
-            raise
+            result["phone_spans"].append(phone_spans)
+            result["mel"].append(mel)
+            result["mel_len"].append(mel_len)
+            result["speaker_emb"].append(emb)
+            result["transcript"].append(text)
+            result["transcript_phonemized"].append(phonemized_ids)
+            result["silences"].append(silences)
+            # convert phone_spans to phone_ids
+            phone_ids = []
+            print(phone_spans)
+            i = 0
+            for phone, (start, end) in phone_spans:
+                if i > 0:
+                    if start != phone_spans[i - 1][1][1]:
+                        print(f"start {start} != {phone_spans[i - 1][1][1]}", phone)
+                if i < len(phone_spans) - 1:
+                    if end != phone_spans[i + 1][1][0]:
+                        print(f"end {end} != {phone_spans[i + 1][1][0]}", phone)
+                i += 1
+                phone_ids.extend([self.phone2id[phone]] * (end - start))
+            assert len(phone_ids) == mel_len
+            # pad phone_ids to N_FRAMES
+            phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
+            result["phone_ids"].append(phone_ids)
+        print(max([len(x) for x in result["transcript_phonemized"]]))
+        return result

@@ -146,7 +146,15 @@ class WhisperAudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-    def forward(self, x):
+        self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
+        self.postnet = nn.Sequential(
+            *[
+                ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+                for _ in range(args.n_postnet_layers)
+            ]
+        )
+
+    def forward(self, x, phone_ids=None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
@@ -162,6 +170,16 @@ class WhisperAudioEncoder(nn.Module):
             x = block(x)
 
         x = self.ln_post(x)
+
+        # postnet
+        if phone_ids is None:
+            phone_ids = torch.zeros(
+                x.shape[0], dtype=torch.long, device=x.device
+            ).unsqueeze(-1)
+        phone_emb = self.postnet_phone_emb(phone_ids)
+        for block in self.postnet:
+            x = block(x, phone_emb)
+
         return x
 
     def save_model(self, path, accelerator=None):
@@ -210,4 +228,7 @@ class WhisperAudioEncoder(nn.Module):
     @property
     def dummy_input(self):
         torch.manual_seed(0)
-        return torch.randn(1, self.args.n_mels, self.args.n_ctx * 2)
+        return [
+            torch.randn(1, self.args.n_mels, self.args.n_ctx * 2),
+            torch.zeros(1, 1, dtype=torch.long),
+        ]
