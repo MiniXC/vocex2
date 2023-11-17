@@ -248,7 +248,6 @@ class VocexCollator(nn.Module):
             # remove 2 consecutive punctuations, or space and punctuation
             phonemized_temp = []
             phonemized_split = phonemized.split(" ")
-            print(phonemized_split)
             for i in range(len(phonemized_split) - 1):
                 if (
                     phonemized_split[i] == "☐"
@@ -389,14 +388,35 @@ class VocexCollator(nn.Module):
                 )
             # remove duplicate silences
             phone_spans_temp = []
+            prev_str = ""
+            # ';:,.!"?()-' ordered from least to most important for prosody
+            punct_importance_order = '?!.,";:-()'
             for i in range(len(phone_spans) - 1):
                 if (
                     phone_spans[i][0] in silence_and_punct
                     and phone_spans[i + 1][0] in silence_and_punct
                 ):
-                    continue
+                    prev_str += phone_spans[i][0]
                 else:
-                    phone_spans_temp.append(phone_spans[i])
+                    if prev_str != "":
+                        prev_str += phone_spans[i][0]
+                        # get the most important punctuation
+                        most_important_punct = None
+                        for symbol in punct_importance_order:
+                            if symbol in prev_str:
+                                most_important_punct = symbol
+                                break
+                        new_start = phone_spans[i - len(prev_str) + 1][1][0]
+                        new_end = phone_spans[i][1][1]
+                        phone_spans_temp.append(
+                            (
+                                most_important_punct,
+                                (new_start, new_end),
+                            )
+                        )
+                    else:
+                        phone_spans_temp.append(phone_spans[i])
+                    prev_str = ""
             phone_spans_temp.append(phone_spans[-1])
             phone_spans = phone_spans_temp
 
@@ -409,7 +429,6 @@ class VocexCollator(nn.Module):
             result["silences"].append(silences)
             # convert phone_spans to phone_ids
             phone_ids = []
-            print(phone_spans)
             i = 0
             for phone, (start, end) in phone_spans:
                 if i > 0:
@@ -419,7 +438,12 @@ class VocexCollator(nn.Module):
                     if end != phone_spans[i + 1][1][0]:
                         print(f"end {end} != {phone_spans[i + 1][1][0]}", phone)
                 i += 1
-                phone_ids.extend([self.phone2id[phone]] * (end - start))
+                try:
+                    phone_ids.extend([self.phone2id[phone]] * (end - start))
+                except KeyError:
+                    print(result)
+                    print(f"KeyError: {phone}")
+                    raise
             assert len(phone_ids) == mel_len
             # pad phone_ids to N_FRAMES
             phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
