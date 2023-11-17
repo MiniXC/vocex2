@@ -61,9 +61,17 @@ def train_epoch(epoch):
     console_rule(f"Epoch {epoch}")
     last_loss = None
     for batch in train_dl:
+        print("test")
         with accelerator.accumulate(model):
-            y = model(batch["image"])
-            loss = loss_func(y, batch["target"])
+            phone_target = batch["phone_ids"]
+            mel_input = batch["mel"]
+            speaker_target = batch["speaker_emb"]
+            phone_cond = batch["transcript_phonemized"]
+            phone_pred = model(
+                mel_input,
+                phone_cond,
+            )
+            loss = loss_func(phone_pred, phone_target)
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(
                 model.parameters(), training_args.gradient_clip_val
@@ -198,7 +206,7 @@ def main():
 
     # model
     if training_args.from_whisper is not None:
-        model = MODEL_CLASS.init_from_whisper(training_args.from_whisper)
+        model = MODEL_CLASS.init_from_whisper(training_args.from_whisper, model_args)
     else:
         model = MODEL_CLASS(model_args)
     console_rule("Model")
@@ -247,6 +255,7 @@ def main():
         shuffle=True,
         collate_fn=collator,
         drop_last=True,
+        num_workers=os.cpu_count(),
     )
 
     val_dl = DataLoader(

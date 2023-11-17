@@ -178,6 +178,7 @@ class VocexCollator(nn.Module):
         ) = utils
         self.get_speech_timestamps = get_speech_timestamps
         self.vad_model = model
+        self.phone_len = args.phone_len
 
     def __call__(self, batch):
         result = {
@@ -263,11 +264,31 @@ class VocexCollator(nn.Module):
                     phonemized_temp.append(phonemized_split[i])
             phonemized_temp.append(phonemized_split[-1])
             phonemized = " ".join(phonemized_temp)
-            phonemized_ids = [
-                self.phone2id[phone]
-                for phone in phonemized.split(" ")
-                if len(phone) > 0
-            ]
+            phonemized_ids = []
+
+            for phone in phonemized.split(" "):
+                if len(phone) > 0:
+                    if phone not in self.phone2id:
+                        # find any substring of phone that is in phone2id
+                        found_substring = False
+                        for i in range(len(phone)):
+                            if phone[: len(phone) - i] in self.phone2id:
+                                phonemized_ids.append(
+                                    self.phone2id[phone[: len(phone) - i]]
+                                )
+                                found_substring = True
+                                break
+                        if not found_substring:
+                            for i in range(len(phone)):
+                                if phone[i:] in self.phone2id:
+                                    phonemized_ids.append(self.phone2id[phone[i:]])
+                                    found_substring = True
+                                    break
+                        if not found_substring:
+                            print(f"Could not find {phone} in phone2id")
+                            phonemized_ids.append(0)
+                    else:
+                        phonemized_ids.append(self.phone2id[phone])
             # align phonemized and phone_ids
             alignments = pairwise2.align.globalxx(ctc_phones, phonemized, gap_char="+")
             zipped = list(zip(alignments[0].seqA, alignments[0].seqB))
@@ -406,6 +427,8 @@ class VocexCollator(nn.Module):
                             if symbol in prev_str:
                                 most_important_punct = symbol
                                 break
+                        if most_important_punct is None:
+                            most_important_punct = "☐"
                         new_start = phone_spans[i - len(prev_str) + 1][1][0]
                         new_end = phone_spans[i][1][1]
                         phone_spans_temp.append(
@@ -425,6 +448,10 @@ class VocexCollator(nn.Module):
             result["mel_len"].append(mel_len)
             result["speaker_emb"].append(emb)
             result["transcript"].append(text)
+            # pad phonemized_ids to phone_len
+            phonemized_ids = phonemized_ids + [0] * (
+                self.phone_len - len(phonemized_ids)
+            )
             result["transcript_phonemized"].append(phonemized_ids)
             result["silences"].append(silences)
             # convert phone_spans to phone_ids
@@ -448,5 +475,9 @@ class VocexCollator(nn.Module):
             # pad phone_ids to N_FRAMES
             phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
             result["phone_ids"].append(phone_ids)
-        print(max([len(x) for x in result["transcript_phonemized"]]))
+        result["mel"] = torch.stack(result["mel"])
+        result["mel_len"] = torch.tensor(result["mel_len"])
+        result["speaker_emb"] = torch.stack(result["speaker_emb"])
+        result["phone_ids"] = torch.tensor(result["phone_ids"])
+        result["transcript_phonemized"] = torch.tensor(result["transcript_phonemized"])
         return result

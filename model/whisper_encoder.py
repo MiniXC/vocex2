@@ -146,6 +146,11 @@ class WhisperAudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
+        if args.freeze_pretrained:
+            console.print("[bold red]Freezing pretrained weights")
+            for p in self.parameters():
+                p.requires_grad = False
+
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
         self.postnet = nn.Sequential(
             *[
@@ -153,6 +158,7 @@ class WhisperAudioEncoder(nn.Module):
                 for _ in range(args.n_postnet_layers)
             ]
         )
+        self.phone_out = Linear(n_state, args.n_phones)
 
     def forward(self, x, phone_ids=None):
         """
@@ -211,16 +217,14 @@ class WhisperAudioEncoder(nn.Module):
         return model
 
     @classmethod
-    def init_from_whisper(cls, whisper_name):
+    def init_from_whisper(cls, whisper_name, args):
         whisper_model = load_model(whisper_name)
         dims = whisper_model.dims
-        args = ModelArgs(
-            n_mels=dims.n_mels,
-            n_ctx=dims.n_audio_ctx,
-            n_state=dims.n_audio_state,
-            n_head=dims.n_audio_head,
-            n_layer=dims.n_audio_layer,
-        )
+        args.n_mels = dims.n_mels
+        args.n_ctx = dims.n_audio_ctx
+        args.n_state = dims.n_audio_state
+        args.n_head = dims.n_audio_head
+        args.n_layer = dims.n_audio_layer
         model = cls(args)
         model.load_state_dict(whisper_model.state_dict(), strict=False)
         return model

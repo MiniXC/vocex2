@@ -35,6 +35,7 @@ class TrainingArgs:
 class CollatorArgs:
     speaker_model: str = "titanet_large"
     name: str = "default"
+    phone_len: int = 500
 
 
 @dataclass
@@ -47,3 +48,4 @@ class ModelArgs:
     n_layer: int = 4
     n_postnet_layers: int = 4
     n_phones: int = 403
+    freeze_pretrained: bool = True
