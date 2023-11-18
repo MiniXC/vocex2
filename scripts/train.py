@@ -61,24 +61,21 @@ def train_epoch(epoch):
     console_rule(f"Epoch {epoch}")
     last_loss = None
     for batch in train_dl:
-        print("test")
-        with accelerator.accumulate(model):
-            phone_target = batch["phone_ids"]
-            mel_input = batch["mel"]
-            speaker_target = batch["speaker_emb"]
-            phone_cond = batch["transcript_phonemized"]
-            phone_pred = model(
-                mel_input,
-                phone_cond,
-            )
-            loss = loss_func(phone_pred, phone_target)
-            accelerator.backward(loss)
-            accelerator.clip_grad_norm_(
-                model.parameters(), training_args.gradient_clip_val
-            )
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+        phone_target = batch["phone_ids"]
+        mel_input = batch["mel"]
+        speaker_target = batch["speaker_emb"]
+        phone_cond = batch["transcript_phonemized"]
+        phone_pred = model(
+            mel_input,
+            phone_cond,
+        ).permute(0, 2, 1)
+        print(phone_pred, phone_target)
+        loss = loss_func(phone_pred, phone_target)
+        accelerator.backward(loss)
+        accelerator.clip_grad_norm_(model.parameters(), training_args.gradient_clip_val)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
         losses.append(loss.detach())
         if (
             step > 0
@@ -155,7 +152,7 @@ def main():
 
     accelerator = Accelerator()
 
-    loss_func = nn.CrossEntropyLoss()
+    loss_func = torch.nn.functional.cross_entropy
 
     # parse args
     (
@@ -209,6 +206,7 @@ def main():
         model = MODEL_CLASS.init_from_whisper(training_args.from_whisper, model_args)
     else:
         model = MODEL_CLASS(model_args)
+
     console_rule("Model")
     print_and_draw_model()
 
@@ -266,7 +264,10 @@ def main():
     )
 
     # optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=training_args.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=training_args.lr,
+    )
 
     # scheduler
     if training_args.lr_schedule == "linear_with_warmup":
@@ -370,6 +371,7 @@ def print_and_draw_model():
             x.repeat((bsz,) + (1,) * (len(x.shape) - 1)) for x in dummy_input
         ]
         console_print(f"[green]input shapes[/green]: {[x.shape for x in dummy_input]}")
+
     model_summary = summary(
         model,
         input_data=dummy_input,

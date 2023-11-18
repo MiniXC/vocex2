@@ -9,7 +9,7 @@ class TrainingArgs:
     gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
     output_path: str = "outputs"
-    from_whisper: str = None
+    from_whisper: str = "tiny.en"
     run_name: str = None
     wandb_mode: str = "offline"
     wandb_project: str = None
@@ -17,7 +17,7 @@ class TrainingArgs:
     libriheavy_size: str = "small"
     libriheavy_path: str = "/dev/shm/libriheavy"
     n_steps: int = 10000
-    batch_size: int = 8
+    batch_size: int = 2
     seed: int = 0
     dataset: str = "mnist"
     log_every_n_steps: int = 100
@@ -48,4 +48,4 @@ class ModelArgs:
     n_layer: int = 4
     n_postnet_layers: int = 4
     n_phones: int = 403
-    freeze_pretrained: bool = True
+    freeze_whisper: bool = True

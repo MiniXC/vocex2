@@ -139,6 +139,7 @@ class WhisperAudioEncoder(nn.Module):
         n_ctx = args.n_ctx
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
+        self.test_in = nn.Linear(n_mels, n_state)
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
 
         self.blocks = nn.ModuleList(
@@ -146,12 +147,10 @@ class WhisperAudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-        if args.freeze_pretrained:
-            console.print("[bold red]Freezing pretrained weights")
-            for p in self.parameters():
-                p.requires_grad = False
-
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
+
+        self.postnet_upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
         self.postnet = nn.Sequential(
             *[
                 ResidualAttentionBlock(n_state, n_head, cross_attention=True)
@@ -160,11 +159,34 @@ class WhisperAudioEncoder(nn.Module):
         )
         self.phone_out = Linear(n_state, args.n_phones)
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            module.bias.data.zero_()
+        if isinstance(module, nn.Conv1d):
+            nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
     def forward(self, x, phone_ids=None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
         """
+        x = self.test_in(x.permute(0, 2, 1))
+        # x = self.postnet_upsample(x)
+        print(x.shape)
+        return self.phone_out(x)
+
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
@@ -177,6 +199,13 @@ class WhisperAudioEncoder(nn.Module):
 
         x = self.ln_post(x)
 
+        # prev shape: (batch_size, 1500, n_state)
+        # post shape: (batch_size, 3000, n_state)
+
+        # upsample to 3000
+        x = self.postnet_upsample(x.permute(0, 2, 1)).permute(0, 2, 1)
+        return self.phone_out(x)
+
         # postnet
         if phone_ids is None:
             phone_ids = torch.zeros(
@@ -185,6 +214,8 @@ class WhisperAudioEncoder(nn.Module):
         phone_emb = self.postnet_phone_emb(phone_ids)
         for block in self.postnet:
             x = block(x, phone_emb)
+
+        x = self.phone_out(x)
 
         return x
 
@@ -227,6 +258,11 @@ class WhisperAudioEncoder(nn.Module):
         args.n_layer = dims.n_audio_layer
         model = cls(args)
         model.load_state_dict(whisper_model.state_dict(), strict=False)
+        if args.freeze_whisper:
+            for name, param in model.named_parameters():
+                if name in whisper_model.state_dict():
+                    param.requires_grad = False
+        del whisper_model
         return model
 
     @property

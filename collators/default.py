@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 from subprocess import run, CalledProcessError
+import logging
 
 import torch
 from torch import nn
@@ -179,6 +180,8 @@ class VocexCollator(nn.Module):
         self.get_speech_timestamps = get_speech_timestamps
         self.vad_model = model
         self.phone_len = args.phone_len
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.ERROR)
 
     def __call__(self, batch):
         result = {
@@ -227,8 +230,6 @@ class VocexCollator(nn.Module):
             ctc_phones = " ".join(
                 [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"]
             )
-            punct = Punctuation(self.punct_symbols)
-            # text = punct.remove(text)
             phonemized = (
                 "☐ "
                 + phonemize(
@@ -238,6 +239,7 @@ class VocexCollator(nn.Module):
                     language="en-us",
                     preserve_punctuation=True,
                     punctuation_marks=self.punct_symbols,
+                    logger=self.logger,
                 )
                 + " ☐"
             )
