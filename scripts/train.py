@@ -4,6 +4,7 @@ from collections import deque
 from pathlib import Path
 import typing
 from dataclasses import fields
+from torchmetrics.text import CharErrorRate
 
 sys.path.append(".")  # add root of project to path
 
@@ -60,16 +61,17 @@ def train_epoch(epoch):
     step = 0
     console_rule(f"Epoch {epoch}")
     last_loss = None
+
     for batch in train_dl:
         phone_target = batch["phone_ids"]
         mel_input = batch["mel"]
+
         speaker_target = batch["speaker_emb"]
         phone_cond = batch["transcript_phonemized"]
         phone_pred = model(
             mel_input,
             phone_cond,
         ).permute(0, 2, 1)
-        print(phone_pred, phone_target)
         loss = loss_func(phone_pred, phone_target)
         accelerator.backward(loss)
         accelerator.clip_grad_norm_(model.parameters(), training_args.gradient_clip_val)
@@ -111,36 +113,60 @@ def train_epoch(epoch):
                 pbar.set_postfix({"loss": f"{last_loss:.3f}"})
 
 
+@torch.no_grad()
 def evaluate(device="cpu"):
     eval_model = create_latest_model_for_eval(device)
+    cer_metric = CharErrorRate()
     if accelerator.is_main_process:
         y_true = []
         y_pred = []
         console_rule("Evaluation")
-        for batch in val_dl:
+        for batch in tqdm(val_dl, desc="eval"):
             batch = move_batch_to_device(batch, "cpu")
-            y = eval_model(batch["image"])
-            y_true.append(batch["target"].cpu().numpy())
-            y_pred.append(y.argmax(-1).cpu().numpy())
+            phone_pred = eval_model(
+                batch["mel"],
+                batch["transcript_phonemized"],
+            ).permute(0, 2, 1)
+            phone_pred = phone_pred.argmax(dim=-1)
+            y_pred.append(phone_pred)
+            y_true.append(batch["phone_ids"])
+            # convert to strings for cer
+            phone_pred = ["".join([chr(x) for x in y]) for y in phone_pred]
+            phone_true = ["".join([chr(x) for x in y]) for y in batch["phone_ids"]]
+            cer_metric(phone_pred, phone_true)
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
         acc = accuracy_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred, average="macro")
-        precision = precision_score(y_true, y_pred, average="macro", zero_division=0)
+        precision = precision_score(y_true, y_pred, average="macro")
         recall = recall_score(y_true, y_pred, average="macro")
+        cer = cer_metric.compute()
         wandb_log(
-            "val", {"acc": acc, "f1": f1, "precision": precision, "recall": recall}
+            "val",
+            {
+                "cer": cer,
+                "acc": acc,
+                "f1": f1,
+                "precision": precision,
+                "recall": recall,
+            },
+            print_log=True,
         )
         evaluate_loss_only()
 
 
+@torch.no_grad()
 def evaluate_loss_only():
     model.eval()
     losses = []
     console_rule("Evaluation")
     for batch in val_dl:
-        y = model(batch["image"])
-        loss = loss_func(y, batch["target"])
+        phone_pred = model(
+            batch["mel"],
+            batch["transcript_phonemized"],
+        ).permute(0, 2, 1)
+        phone_target = batch["phone_ids"]
+        loss = loss_func(phone_pred, phone_target)
         losses.append(loss.detach())
     wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
 

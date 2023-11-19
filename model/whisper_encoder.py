@@ -139,7 +139,6 @@ class WhisperAudioEncoder(nn.Module):
         n_ctx = args.n_ctx
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
-        self.test_in = nn.Linear(n_mels, n_state)
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
 
         self.blocks = nn.ModuleList(
@@ -157,7 +156,7 @@ class WhisperAudioEncoder(nn.Module):
                 for _ in range(args.n_postnet_layers)
             ]
         )
-        self.phone_out = Linear(n_state, args.n_phones)
+        self.phone_out = nn.Linear(n_state, args.n_phones)
 
         self.apply(self._init_weights)
 
@@ -182,11 +181,6 @@ class WhisperAudioEncoder(nn.Module):
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
         """
-        x = self.test_in(x.permute(0, 2, 1))
-        # x = self.postnet_upsample(x)
-        print(x.shape)
-        return self.phone_out(x)
-
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
@@ -204,7 +198,6 @@ class WhisperAudioEncoder(nn.Module):
 
         # upsample to 3000
         x = self.postnet_upsample(x.permute(0, 2, 1)).permute(0, 2, 1)
-        return self.phone_out(x)
 
         # postnet
         if phone_ids is None:
@@ -212,6 +205,7 @@ class WhisperAudioEncoder(nn.Module):
                 x.shape[0], dtype=torch.long, device=x.device
             ).unsqueeze(-1)
         phone_emb = self.postnet_phone_emb(phone_ids)
+
         for block in self.postnet:
             x = block(x, phone_emb)
 

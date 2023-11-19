@@ -5,7 +5,6 @@ from configs.args import TrainingArgs
 
 
 def plot_first_batch(batch, args: TrainingArgs):
-    print(batch)
     for i in range(len(batch["mel"])):
         mel = batch["mel"][i]
         phone_spans = batch["phone_spans"][i]

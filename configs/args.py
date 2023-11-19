@@ -15,9 +15,9 @@ class TrainingArgs:
     wandb_project: str = None
     wandb_dir: str = "wandb"
     libriheavy_size: str = "small"
-    libriheavy_path: str = "/dev/shm/libriheavy"
-    n_steps: int = 10000
-    batch_size: int = 2
+    libriheavy_path: str = "/dev/shm/libriheavy-small"
+    n_steps: int = 50000
+    batch_size: int = 4
     seed: int = 0
     dataset: str = "mnist"
     log_every_n_steps: int = 100
