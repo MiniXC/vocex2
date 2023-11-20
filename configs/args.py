@@ -12,7 +12,7 @@ class TrainingArgs:
     from_whisper: str = "tiny.en"
     run_name: str = None
     wandb_mode: str = "offline"
-    wandb_project: str = None
+    wandb_project: str = "vocex2"
     wandb_dir: str = "wandb"
     libriheavy_size: str = "small"
     libriheavy_path: str = "/dev/shm/libriheavy-small"

@@ -217,7 +217,11 @@ def main():
     console_print(f"[green]process_index[/green]: {accelerator.process_index}")
 
     # model
-    if training_args.from_whisper is not None:
+    if training_args.from_whisper is not None and training_args.from_whisper not in [
+        "None",
+        "none",
+        "",
+    ]:
         model = MODEL_CLASS.init_from_whisper(training_args.from_whisper, model_args)
     else:
         model = MODEL_CLASS(model_args)
