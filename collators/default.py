@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 from subprocess import run, CalledProcessError
 import logging
+import warnings
 
 import torch
 from torch import nn
@@ -47,7 +48,6 @@ def get_speech_timestamps(
     window_size_samples=512,
     speech_pad_ms=30,
     return_seconds=False,
-    visualize_probs=False,
     progress_tracking_callback=None,
 ):
     """
@@ -217,9 +217,6 @@ def get_speech_timestamps(
         for speech_dict in speeches:
             speech_dict["start"] *= step
             speech_dict["end"] *= step
-
-    if visualize_probs:
-        make_visualization(speech_probs, window_size_samples / sampling_rate)
 
     return speeches
 
