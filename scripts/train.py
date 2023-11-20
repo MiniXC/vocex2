@@ -137,6 +137,13 @@ def evaluate(device="cpu"):
                 # convert to strings for cer
                 phone_pred_s = "".join([chr(x) for x in phone_pred[j].tolist()])
                 phone_true_s = "".join([chr(x) for x in phone_ids[j].tolist()])
+                # remove repeated characters
+                phone_pred_s = "".join(
+                    [x for x, y in zip(phone_pred_s, phone_pred_s[1:]) if x != y]
+                )
+                phone_true_s = "".join(
+                    [x for x, y in zip(phone_true_s, phone_true_s[1:]) if x != y]
+                )
                 cer_metric(phone_pred_s, phone_true_s)
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
