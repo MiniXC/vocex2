@@ -144,6 +144,44 @@ class SpeakerMLP(nn.Module):
         return self.mlp(x)
 
 
+class AttributesMLP(nn.Module):
+    def __init__(self, n_state, n_layer, n_attributes):
+        super().__init__()
+        mlp = []
+        mlp.append(Linear(n_state * 2, n_state * 4))
+        mlp.append(nn.GELU())
+        for i in range(n_layer - 1):
+            mlp.append(Linear(n_state * 4, n_state * 4))
+            mlp.append(nn.GELU())
+        mlp.append(Linear(n_state * 4, n_attributes))
+
+        self.mlp = nn.Sequential(*mlp)
+
+    def forward(self, x):
+        # mean + max pool (previous shape: (batch_size, 1500, n_state) -> (batch_size, n_state * 2))
+        x = torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=-1)
+        return self.mlp(x)
+
+
+class FrameProsodyMLP(nn.Module):
+    def __init__(self, n_state, n_layer):
+        super().__init__()
+        mlp = []
+        mlp.append(Linear(n_state, n_state))
+        mlp.append(nn.GELU())
+        for i in range(n_layer - 1):
+            mlp.append(Linear(n_state, n_state))
+            mlp.append(nn.GELU())
+        mlp.append(Linear(n_state, 1))
+
+        self.mlp = nn.Sequential(*mlp)
+
+    def forward(self, x):
+        # previous shape: (batch_size, 3000, n_state) -> (batch_size, 3000, 1))
+        x = self.mlp(x)
+        return x
+
+
 class WhisperAudioEncoder(nn.Module):
     def __init__(
         self,
@@ -165,14 +203,19 @@ class WhisperAudioEncoder(nn.Module):
         )
         self.ln_post = LayerNorm(n_state)
 
-        # since we avg + max pool, we only use a MLP here
-        # speaker_postnet_layers = args.n_speaker_postnet_layers
-        # speaker_emb_dim = args.speaker_emb_dim
-        # self.speaker_mlp = SpeakerMLP(n_state, speaker_postnet_layers, speaker_emb_dim)
+        speaker_postnet_layers = args.speaker_postnet_layers
+        speaker_emb_dim = args.speaker_emb_dim
+        self.speaker_mlp = SpeakerMLP(n_state, speaker_postnet_layers, speaker_emb_dim)
 
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
 
         self.postnet_upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
+        self.pitch_mlp = FrameProsodyMLP(n_state, args.prosody_postnet_layers)
+        self.energy_mlp = FrameProsodyMLP(n_state, args.prosody_postnet_layers)
+        self.attributes_mlp = AttributesMLP(
+            n_state, args.prosody_postnet_layers, args.n_attributes
+        )
 
         self.postnet = nn.Sequential(
             *[
@@ -217,11 +260,23 @@ class WhisperAudioEncoder(nn.Module):
 
         x = self.ln_post(x)
 
+        # speaker embedding
+        speaker_emb = self.speaker_mlp(x)
+
         # prev shape: (batch_size, 1500, n_state)
         # post shape: (batch_size, 3000, n_state)
 
         # upsample to 3000
         x = self.postnet_upsample(x.permute(0, 2, 1)).permute(0, 2, 1)
+
+        # pitch
+        pitch = self.pitch_mlp(x).squeeze(-1)
+
+        # energy
+        energy = self.energy_mlp(x).squeeze(-1)
+
+        # attributes
+        attributes = self.attributes_mlp(x)
 
         # postnet
         if phone_ids is None:
@@ -235,7 +290,13 @@ class WhisperAudioEncoder(nn.Module):
 
         x = self.phone_out(x)
 
-        return x
+        return {
+            "phones": x,
+            "speaker_emb": speaker_emb,
+            "pitch": pitch,
+            "energy": energy,
+            "attributes": attributes,
+        }
 
     def save_model(self, path, accelerator=None):
         path = Path(path)

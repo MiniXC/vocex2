@@ -29,7 +29,7 @@ from rich.console import Console
 
 # plotting
 import matplotlib.pyplot as plt
-from util.plotting import plot_first_batch
+from util.plotting import plot_first_batch, plot_predictions, plot_item
 
 console = Console()
 
@@ -41,6 +41,16 @@ from model.whisper_encoder import WhisperAudioEncoder
 from collators import get_collator
 
 MODEL_CLASS = WhisperAudioEncoder
+
+"""
+TODO:
+- [ ] add training for speaker embedding
+- [ ] add training for prosody frame level prediction
+- [ ] add training for utterance level prosody/channel prediction (mean, std)
+- [ ] add evaluation for the above
+- [ ] add evaluation plotting (alignment & spectrogram as in first batch)
+- [ ] call espeak manually to avoid memory problems
+"""
 
 
 class DatasetFromDataframe(Dataset):
@@ -58,34 +68,75 @@ class DatasetFromDataframe(Dataset):
 def train_epoch(epoch):
     global global_step
     losses = deque(maxlen=training_args.log_every_n_steps)
+    phone_losses = deque(maxlen=training_args.log_every_n_steps)
+    speaker_losses = deque(maxlen=training_args.log_every_n_steps)
+    attribute_losses = deque(maxlen=training_args.log_every_n_steps)
+    pitch_losses = deque(maxlen=training_args.log_every_n_steps)
+    energy_losses = deque(maxlen=training_args.log_every_n_steps)
     step = 0
     console_rule(f"Epoch {epoch}")
     last_loss = None
 
     for batch in train_dl:
-        phone_target = batch["phone_ids"]
         mel_input = batch["mel"]
-
-        speaker_target = batch["speaker_emb"]
         phone_cond = batch["transcript_phonemized"]
-        phone_pred = model(
+
+        phone_target = batch["phone_ids"]
+        speaker_target = batch["speaker_emb"]
+        attribute_target = batch["attributes"]
+        pitch_target = batch["pitch"]
+        energy_target = batch["energy"]
+
+        preds = model(
             mel_input,
             phone_cond,
-        ).permute(0, 2, 1)
-        loss = loss_func(phone_pred, phone_target)
+        )
+
+        phone_loss = loss_func(preds["phones"].permute(0, 2, 1), phone_target)
+        # use mse for all other targets
+        speaker_loss = nn.MSELoss()(preds["speaker_emb"], speaker_target)
+        attribute_loss = nn.MSELoss()(preds["attributes"], attribute_target)
+        pitch_loss = nn.MSELoss()(preds["pitch"], pitch_target)
+        energy_loss = nn.MSELoss()(preds["energy"], energy_target)
+
+        loss = (
+            phone_loss + speaker_loss + attribute_loss + pitch_loss + energy_loss
+        ) / 5
+
         accelerator.backward(loss)
         accelerator.clip_grad_norm_(model.parameters(), training_args.gradient_clip_val)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
         losses.append(loss.detach())
+        phone_losses.append(phone_loss.detach())
+        speaker_losses.append(speaker_loss.detach())
+        attribute_losses.append(attribute_loss.detach())
+        pitch_losses.append(pitch_loss.detach())
+        energy_losses.append(energy_loss.detach())
         if (
             step > 0
             and step % training_args.log_every_n_steps == 0
             and accelerator.is_main_process
         ):
             last_loss = torch.mean(torch.tensor(losses)).item()
-            wandb_log("train", {"loss": last_loss}, print_log=False)
+            last_phone_loss = torch.mean(torch.tensor(phone_losses)).item()
+            last_speaker_loss = torch.mean(torch.tensor(speaker_losses)).item()
+            last_attribute_loss = torch.mean(torch.tensor(attribute_losses)).item()
+            last_pitch_loss = torch.mean(torch.tensor(pitch_losses)).item()
+            last_energy_loss = torch.mean(torch.tensor(energy_losses)).item()
+            wandb_log(
+                "train",
+                {
+                    "loss": last_loss,
+                    "phone_loss": last_phone_loss,
+                    "speaker_loss": last_speaker_loss,
+                    "attribute_loss": last_attribute_loss,
+                    "pitch_loss": last_pitch_loss,
+                    "energy_loss": last_energy_loss,
+                },
+                print_log=True,
+            )
         if (
             training_args.do_save
             and global_step > 0
@@ -107,7 +158,16 @@ def train_epoch(epoch):
         if accelerator.is_main_process:
             pbar.update(1)
             if last_loss is not None:
-                pbar.set_postfix({"loss": f"{last_loss:.3f}"})
+                pbar.set_postfix(
+                    {
+                        "loss": f"{last_loss:.3f}",
+                        "phone_loss": f"{last_phone_loss:.3f}",
+                        "speaker_loss": f"{last_speaker_loss:.3f}",
+                        "attribute_loss": f"{last_attribute_loss:.3f}",
+                        "pitch_loss": f"{last_pitch_loss:.3f}",
+                        "energy_loss": f"{last_energy_loss:.3f}",
+                    }
+                )
 
 
 @torch.no_grad()
@@ -133,6 +193,8 @@ def evaluate(device="cpu"):
             losses.append(loss.item())
             phone_pred = phone_pred.permute(0, 2, 1).argmax(dim=-1)
             for j in range(bs):
+                if i == 0 and j == 0:
+                    pass
                 y_pred.append(phone_pred[j])
                 y_true.append(phone_ids[j])
                 # convert to strings for cer
@@ -294,6 +356,13 @@ def main():
         first_batch = collator([train_ds[i] for i in range(training_args.batch_size)])
         plot_first_batch(first_batch, training_args)
         plt.savefig("figures/first_batch.png")
+        plot_predictions(
+            first_batch["mel"][0],
+            first_batch["mel_len"][0],
+            first_batch["phone_ids"][0],
+            collator.id2phone,
+            training_args,
+        )
 
     # dataloader
     train_dl = DataLoader(

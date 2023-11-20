@@ -13,9 +13,13 @@ from configs.args import CollatorArgs
 import torchaudio
 import soundfile as sf
 import librosa
-from phonemizer import phonemize
+from phonemizer import Phonemizer
 from phonemizer.separator import Separator
 from phonemizer.punctuation import Punctuation
+import pyworld as pw
+
+# resample
+from scipy import signal
 
 # for aligning phonemized and phone_ids
 from Bio import pairwise2
@@ -30,9 +34,10 @@ from whisper.audio import (
     N_SAMPLES,
     N_FRAMES,
 )
-from simple_hifigan import Synthesiser
 
-synthesiser = Synthesiser()
+from .snr import get_snr
+from .srmr import get_srmr
+
 
 N_MELS = 80
 
@@ -241,7 +246,7 @@ def get_speaker_embedding(model, audio):
         logits, emb = model.forward(
             input_signal=audio_signal, input_signal_length=audio_signal_len
         )
-        return emb, logits
+        return torch.clip(emb * 10, -1, 1), logits
 
 
 def load_audio(file, start, duration, sr=SAMPLE_RATE):
@@ -327,6 +332,63 @@ def get_silences(get_speech_timestamps, model, audio, mel_len):
         return silences
 
 
+def interpolate_nan(x):
+    def nan_helper(y):
+        return np.isnan(y), lambda z: z.nonzero()[0]
+
+    nans, y = nan_helper(x)
+    x[nans] = np.interp(y(nans), y(~nans), x[~nans])
+    return x
+
+
+MAX_PITCH = 500
+MIN_PITCH = 50
+
+
+def get_pitch(audio, mel_len, sampling_rate=16000):
+    pitch_audio = audio.astype(np.float64)
+    f0, t = pw.dio(
+        pitch_audio,
+        sampling_rate,
+    )
+    f0 = pw.stonemask(pitch_audio, f0, t, sampling_rate)
+    f0[f0 < 0.05] = np.nan
+    # interpolate missing values
+    f0 = interpolate_nan(f0)
+    # resample f0 to mel_len using scipy.signal.resample
+    f0 = signal.decimate(f0, int(len(f0) / mel_len))
+    # convolutional smoothing
+    # extend f0 to avoid edge effects
+    f0 = np.concatenate([np.ones(4) * f0[0], f0, np.ones(4) * f0[-1]])
+    win = signal.windows.hann(9)
+    f0 = signal.convolve(f0, win / win.sum(), mode="same")
+    f0 = f0[4:-4]
+    if len(f0) < mel_len:
+        f0 = np.concatenate([f0, np.ones(mel_len - len(f0)) * f0[-1]])
+    elif len(f0) > mel_len:
+        f0 = f0[:mel_len]
+    f0 = np.clip(f0, MIN_PITCH, MAX_PITCH)
+    # bring f0 to [-1, 1]
+    f0 = (f0 - MIN_PITCH) / (MAX_PITCH - MIN_PITCH) * 2 - 1
+    return f0
+
+
+def get_energy(mel_spec, mel_len):
+    energy = torch.sum(mel_spec - torch.min(mel_spec), axis=0) / mel_spec.shape[0]
+    energy = energy.numpy()
+    # convolutional smoothing
+    # extend energy to avoid edge effects
+    energy = np.concatenate([np.ones(4) * energy[0], energy, np.ones(4) * energy[-1]])
+    win = np.ones(9)
+    energy = signal.convolve(energy, win / win.sum(), mode="same")
+    energy = energy[4:-4]
+    energy = energy[:mel_len]
+    energy = np.clip(energy, 0, 1)
+    # bring energy to [-1, 1]
+    energy = energy * 2 - 1
+    return energy
+
+
 class VocexCollator(nn.Module):
     def __init__(
         self,
@@ -356,8 +418,16 @@ class VocexCollator(nn.Module):
         self.get_speech_timestamps = get_speech_timestamps
         self.vad_model = vad_model
         self.phone_len = args.phone_len
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.ERROR)
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.ERROR)
+        self.phonemizer = Phonemizer(
+            separator=Separator(phone=" ", word=" ☐ "),
+            backend="espeak",
+            language="en-us",
+            preserve_punctuation=True,
+            punctuation_marks=self.punct_symbols,
+            logger=logger,
+        )
 
     def __call__(self, batch):
         result = {
@@ -369,6 +439,9 @@ class VocexCollator(nn.Module):
             "transcript": [],
             "transcript_phonemized": [],
             "silences": [],
+            "pitch": [],
+            "energy": [],
+            "attributes": [],  # snr, srmr, pitch mean, pitch std, energy mean, energy std
         }
         for item in batch:
             file_path = self.libriheavy_path / item["recording"]["sources"][0]["source"]
@@ -385,6 +458,19 @@ class VocexCollator(nn.Module):
                 emb,
                 _,
             ) = get_speaker_embedding(self.speaker_model, audio)
+            # pitch, energy, etc
+            pitch = get_pitch(audio, mel_len)
+            energy = get_energy(mel, mel_len)
+            assert len(pitch) == mel_len
+            assert len(energy) == mel_len
+            # pad to N_FRAMES (they are numpy arrays)
+            pitch = np.concatenate([pitch, np.zeros(N_FRAMES - len(pitch))])
+            energy = np.concatenate([energy, np.zeros(N_FRAMES - len(energy))])
+            snr = get_snr(audio)
+            srmr = get_srmr(audio)
+            # print(
+            #     f"SNR: {snr}, SRMR: {srmr}, pitch (mean): {pitch.mean()}, energy (mean): {energy.mean()}, pitch (std): {pitch.std()}, energy (std): {energy.std()}"
+            # )
             phone_input = self.phone_processor(
                 audio, return_tensors="pt", sampling_rate=SAMPLE_RATE
             ).input_values
@@ -406,19 +492,7 @@ class VocexCollator(nn.Module):
             ctc_phones = " ".join(
                 [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"]
             )
-            phonemized = (
-                "☐ "
-                + phonemize(
-                    text,
-                    separator=Separator(phone=" ", word=" ☐ "),
-                    backend="espeak",
-                    language="en-us",
-                    preserve_punctuation=True,
-                    punctuation_marks=self.punct_symbols,
-                    logger=self.logger,
-                )
-                + " ☐"
-            )
+            phonemized = "☐ " + self.phonemizer(text) + " ☐"
             # if punctuations are not separated by spaces, add spaces
             for symbol in self.punct_symbols:
                 phonemized = phonemized.replace(symbol, f" {symbol} ")
@@ -624,6 +698,11 @@ class VocexCollator(nn.Module):
             result["phone_spans"].append(phone_spans)
             result["mel"].append(mel)
             result["mel_len"].append(mel_len)
+            result["pitch"].append(pitch)
+            result["energy"].append(energy)
+            result["attributes"].append(
+                [snr, srmr, pitch.mean(), pitch.std(), energy.mean(), energy.std()]
+            )
             result["speaker_emb"].append(emb)
             result["transcript"].append(text)
             # pad phonemized_ids to phone_len
@@ -657,7 +736,16 @@ class VocexCollator(nn.Module):
             result["phone_ids"].append(phone_ids)
         result["mel"] = torch.stack(result["mel"])
         result["mel_len"] = torch.tensor(result["mel_len"])
-        result["speaker_emb"] = torch.stack(result["speaker_emb"])
+        result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)
+        print(
+            result["speaker_emb"].shape,
+            result["speaker_emb"].min(),
+            result["speaker_emb"].max(),
+            result["speaker_emb"].mean(),
+        )
         result["phone_ids"] = torch.tensor(result["phone_ids"])
         result["transcript_phonemized"] = torch.tensor(result["transcript_phonemized"])
+        result["pitch"] = torch.tensor(np.array(result["pitch"]))
+        result["energy"] = torch.tensor(np.array(result["energy"]))
+        result["attributes"] = torch.tensor(result["attributes"])
         return result

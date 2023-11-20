@@ -47,8 +47,10 @@ class ModelArgs:
     n_state: int = 384
     n_head: int = 6
     n_layer: int = 4
-    n_postnet_layers: int = 4
+    n_postnet_layers: int = 8
+    prosody_postnet_layers: int = 4
     speaker_postnet_layers: int = 4
     speaker_emb_dim: int = 192
     n_phones: int = 403
+    n_attributes: int = 6
     freeze_whisper: bool = True

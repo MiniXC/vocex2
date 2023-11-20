@@ -21,3 +21,4 @@ phonemizer==3.2.1
 nemo_toolkit [all] == 1.21.0
 openai-whisper==20231117
 simple-hifigan @ git+https://github.com/MiniXC/simple_hifigan.git
+srmrpy @ git+https://github.com/MiniXC/SRMRpy.git
