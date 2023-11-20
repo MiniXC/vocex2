@@ -100,10 +100,7 @@ def train_epoch(epoch):
             and global_step % training_args.eval_every_n_steps == 0
             and accelerator.is_main_process
         ):
-            if training_args.do_full_eval:
-                evaluate()
-            else:
-                evaluate_loss_only()
+            evaluate()
             console_rule(f"Epoch {epoch}")
         step += 1
         global_step += 1
@@ -116,24 +113,31 @@ def train_epoch(epoch):
 @torch.no_grad()
 def evaluate(device="cpu"):
     eval_model = create_latest_model_for_eval(device)
-    cer_metric = CharErrorRate()
+    eval_model.eval()
     if accelerator.is_main_process:
+        cer_metric = CharErrorRate()
         y_true = []
         y_pred = []
+        losses = []
         console_rule("Evaluation")
-        for batch in tqdm(val_dl, desc="eval"):
-            batch = move_batch_to_device(batch, "cpu")
+        for i in tqdm(range(10), desc="eval"):
+            bs = training_args.batch_size
+            batch = collator([val_ds[j + (i * bs)] for j in range(bs)])
             phone_pred = eval_model(
-                batch["mel"],
-                batch["transcript_phonemized"],
+                batch["mel"].to(device),
+                batch["transcript_phonemized"].to(device),
             ).permute(0, 2, 1)
-            phone_pred = phone_pred.argmax(dim=-1)
-            y_pred.append(phone_pred)
-            y_true.append(batch["phone_ids"])
-            # convert to strings for cer
-            phone_pred = ["".join([chr(x) for x in y]) for y in phone_pred]
-            phone_true = ["".join([chr(x) for x in y]) for y in batch["phone_ids"]]
-            cer_metric(phone_pred, phone_true)
+            phone_ids = batch["phone_ids"].to(device)
+            loss = loss_func(phone_pred, phone_ids)
+            losses.append(loss.item())
+            phone_pred = phone_pred.permute(0, 2, 1).argmax(dim=-1)
+            for j in range(bs):
+                y_pred.append(phone_pred[j])
+                y_true.append(phone_ids[j])
+                # convert to strings for cer
+                phone_pred_s = "".join([chr(x) for x in phone_pred[j].tolist()])
+                phone_true_s = "".join([chr(x) for x in phone_ids[j].tolist()])
+                cer_metric(phone_pred_s, phone_true_s)
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
         acc = accuracy_score(y_true, y_pred)
@@ -141,38 +145,23 @@ def evaluate(device="cpu"):
         precision = precision_score(y_true, y_pred, average="macro")
         recall = recall_score(y_true, y_pred, average="macro")
         cer = cer_metric.compute()
+        loss = np.mean(losses)
         wandb_log(
             "val",
             {
-                "cer": cer,
+                "cer": cer.item(),
                 "acc": acc,
                 "f1": f1,
                 "precision": precision,
                 "recall": recall,
+                "loss": loss,
             },
             print_log=True,
         )
-        evaluate_loss_only()
-
-
-@torch.no_grad()
-def evaluate_loss_only():
-    model.eval()
-    losses = []
-    console_rule("Evaluation")
-    for batch in val_dl:
-        phone_pred = model(
-            batch["mel"],
-            batch["transcript_phonemized"],
-        ).permute(0, 2, 1)
-        phone_target = batch["phone_ids"]
-        loss = loss_func(phone_pred, phone_target)
-        losses.append(loss.detach())
-    wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
 
 
 def main():
-    global accelerator, training_args, model_args, collator_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar, loss_func
+    global accelerator, training_args, model_args, collator, val_ds, collator_args, train_dl, optimizer, scheduler, model, global_step, pbar, loss_func
 
     global_step = 0
 
@@ -244,6 +233,7 @@ def main():
         / "libriheavy_cuts_small.jsonl.gz",
         lines=True,
     )
+    data["speaker_id"] = data["supervisions"].apply(lambda x: x[0]["speaker"])
     # remove all rows with "duration" >= 30
     len_pre = len(data)
     data = data[data["duration"] < 30]
@@ -251,17 +241,21 @@ def main():
     console_print(
         f"[green]removed rows due to duration >= 30s[/green]: {len_pre-len_post} ({(len_pre-len_post)/len_pre*100:.2f}%)"
     )
-    # move every 100th file to val
-    val = data.iloc[::100]
-    train = data.drop(val.index)
+    # move 10 randomly selected speakers to val_ds
+    speaker_ids = data["speaker_id"].unique()
+    np.random.seed(training_args.seed)
+    val_speaker_ids = np.random.choice(speaker_ids, 10, replace=False)
+    val_ds = data[data["speaker_id"].isin(val_speaker_ids)]
+    train_ds = data.drop(val_ds.index)
     collator_args.libriheavy_path = training_args.libriheavy_path
-
+    # shuffle val_ds with seed
+    val_ds = val_ds.sample(frac=1, random_state=training_args.seed)
     console_print(f"[green]dataset path[/green]: {training_args.libriheavy_path}")
-    console_print(f"[green]train_split size[/green]: {len(train)}")
-    console_print(f"[green]val_split size[/green]: {len(val)}")
+    console_print(f"[green]train_split size[/green]: {len(train_ds)}")
+    console_print(f"[green]val_split size[/green]: {len(val_ds)}")
 
-    train_ds = DatasetFromDataframe(train)
-    val_ds = DatasetFromDataframe(val)
+    train_ds = DatasetFromDataframe(train_ds)
+    val_ds = DatasetFromDataframe(val_ds)
 
     # collator
     collator = get_collator(collator_args)
@@ -282,13 +276,6 @@ def main():
         num_workers=os.cpu_count(),
     )
 
-    val_dl = DataLoader(
-        val_ds,
-        batch_size=training_args.batch_size,
-        shuffle=False,
-        collate_fn=collator,
-    )
-
     # optimizer
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -306,8 +293,8 @@ def main():
         raise NotImplementedError(f"{training_args.lr_schedule} not implemented")
 
     # accelerator
-    model, optimizer, train_dl, val_dl, scheduler = accelerator.prepare(
-        model, optimizer, train_dl, val_dl, scheduler
+    model, optimizer, train_dl, scheduler = accelerator.prepare(
+        model, optimizer, train_dl, scheduler
     )
 
     # evaluation
@@ -480,22 +467,8 @@ def create_latest_model_for_eval(device="cpu"):
         eval_model = MODEL_CLASS.from_pretrained(checkpoint_path)
         eval_model.eval()
         eval_model = eval_model.to(device)
-    return eval_model
-
-
-def move_batch_to_device(batch, device):
-    if isinstance(batch, dict):
-        for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                batch[k] = move_batch_to_device(batch[k], device)
-            elif isinstance(v, list):
-                # recursively move list of tensors to device
-                batch[k] = move_batch_to_device(batch[k], device)
-    elif isinstance(batch, list):
-        batch = [move_batch_to_device(x, device) for x in batch]
-    elif isinstance(batch, torch.Tensor):
-        batch = batch.to(device)
-    return batch
+        return eval_model
+    return None
 
 
 # main

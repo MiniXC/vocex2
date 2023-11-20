@@ -633,6 +633,8 @@ class VocexCollator(nn.Module):
             phonemized_ids = phonemized_ids + [0] * (
                 self.phone_len - len(phonemized_ids)
             )
+            # if phonemized_ids is longer than phone_len, truncate it
+            phonemized_ids = phonemized_ids[: self.phone_len]
             result["transcript_phonemized"].append(phonemized_ids)
             result["silences"].append(silences)
             # convert phone_spans to phone_ids
