@@ -8,8 +8,8 @@ if [ "$1" = "--dryrun" ]; then
     sudo apt-get install espeak -y
 fi
 if [ "$1" = "--machine" ] && [ "$2" = "v3-1" ]; then
-	python3 scripts/train.py --freeze_whisper=True --from_whisper="tiny.en" --wandb_mode=online --run_name "tiny_frozen_align"
     python3 scripts/train.py --freeze_whisper=False --from_whisper="tiny.en" --wandb_mode=online --run_name "tiny_unfrozen_align"
+    python3 scripts/train.py --freeze_whisper=True --from_whisper="tiny.en" --wandb_mode=online --run_name "tiny_frozen_align"
 fi
 if [ "$1" = "--machine" ] && [ "$2" = "v3-2" ]; then
     python3 scripts/train.py --freeze_whisper=True --from_whisper="small.en" --wandb_mode=online --run_name "small_frozen_align"

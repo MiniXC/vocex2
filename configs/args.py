@@ -19,7 +19,6 @@ class TrainingArgs:
     n_steps: int = 50000
     batch_size: int = 4
     seed: int = 0
-    dataset: str = "mnist"
     log_every_n_steps: int = 100
     do_full_eval: bool = True
     do_save: bool = False
@@ -48,5 +47,7 @@ class ModelArgs:
     n_head: int = 6
     n_layer: int = 4
     n_postnet_layers: int = 4
+    speaker_postnet_layers: int = 4
+    speaker_emb_dim: int = 192
     n_phones: int = 403
     freeze_whisper: bool = True

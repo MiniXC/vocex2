@@ -125,6 +125,25 @@ class ResidualAttentionBlock(nn.Module):
         return x
 
 
+class SpeakerMLP(nn.Module):
+    def __init__(self, n_state, n_layer, speaker_emb_dim):
+        super().__init__()
+        mlp = []
+        mlp.append(Linear(n_state * 2, n_state * 4))
+        mlp.append(nn.GELU())
+        for i in range(n_layer - 1):
+            mlp.append(Linear(n_state * 4, n_state * 4))
+            mlp.append(nn.GELU())
+        mlp.append(Linear(n_state * 4, speaker_emb_dim))
+
+        self.mlp = nn.Sequential(*mlp)
+
+    def forward(self, x):
+        # mean + max pool (previous shape: (batch_size, 1500, n_state) -> (batch_size, n_state * 2))
+        x = torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=-1)
+        return self.mlp(x)
+
+
 class WhisperAudioEncoder(nn.Module):
     def __init__(
         self,
@@ -145,6 +164,11 @@ class WhisperAudioEncoder(nn.Module):
             [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)]
         )
         self.ln_post = LayerNorm(n_state)
+
+        # since we avg + max pool, we only use a MLP here
+        # speaker_postnet_layers = args.n_speaker_postnet_layers
+        # speaker_emb_dim = args.speaker_emb_dim
+        # self.speaker_mlp = SpeakerMLP(n_state, speaker_postnet_layers, speaker_emb_dim)
 
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
 
