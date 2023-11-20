@@ -116,6 +116,7 @@ def evaluate(device="cpu"):
     eval_model.eval()
     if accelerator.is_main_process:
         cer_metric = CharErrorRate()
+        cer_metric_transcript = CharErrorRate()
         y_true = []
         y_pred = []
         losses = []
@@ -137,6 +138,9 @@ def evaluate(device="cpu"):
                 # convert to strings for cer
                 phone_pred_s = "".join([chr(x) for x in phone_pred[j].tolist()])
                 phone_true_s = "".join([chr(x) for x in phone_ids[j].tolist()])
+                phone_true_s_transcript = "".join(
+                    [chr(x) for x in batch["transcript_phonemized"][j].tolist()]
+                )
                 # remove repeated characters
                 phone_pred_s = "".join(
                     [x for x, y in zip(phone_pred_s, phone_pred_s[1:]) if x != y]
@@ -144,7 +148,17 @@ def evaluate(device="cpu"):
                 phone_true_s = "".join(
                     [x for x, y in zip(phone_true_s, phone_true_s[1:]) if x != y]
                 )
+                phone_true_s_transcript = "".join(
+                    [
+                        x
+                        for x, y in zip(
+                            phone_true_s_transcript, phone_true_s_transcript[1:]
+                        )
+                        if x != y
+                    ]
+                )
                 cer_metric(phone_pred_s, phone_true_s)
+                cer_metric_transcript(phone_pred_s, phone_true_s_transcript)
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
         acc = accuracy_score(y_true, y_pred)
@@ -152,11 +166,13 @@ def evaluate(device="cpu"):
         precision = precision_score(y_true, y_pred, average="macro")
         recall = recall_score(y_true, y_pred, average="macro")
         cer = cer_metric.compute()
+        cer_transcript = cer_metric_transcript.compute()
         loss = np.mean(losses)
         wandb_log(
             "val",
             {
                 "cer": cer.item(),
+                "cer_transcript": cer_transcript.item(),
                 "acc": acc,
                 "f1": f1,
                 "precision": precision,
@@ -224,7 +240,9 @@ def main():
     console_print(f"[green]process_index[/green]: {accelerator.process_index}")
 
     # model
-    if training_args.from_whisper is not None and training_args.from_whisper not in [
+    if training_args.from_pretrained is not None:
+        model = MODEL_CLASS.from_pretrained(training_args.from_pretrained)
+    elif training_args.from_whisper is not None and training_args.from_whisper not in [
         "None",
         "none",
         "",
@@ -288,7 +306,7 @@ def main():
     )
 
     # optimizer
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=training_args.lr,
     )

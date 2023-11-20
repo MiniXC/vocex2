@@ -24,3 +24,4 @@ if [ "$1" = "--machine" ] && [ "$2" = "v3-4" ]; then
     python3 scripts/train.py --freeze_whisper=False --from_whisper="small.en" --wandb_mode=online --run_name "small_unfrozen_align"
     python3 scripts/train.py --freeze_whisper=False --from_whisper="medium.en" --wandb_mode=online --run_name "medium_unfrozen_align"
 fi
+# python scripts/train.py --freeze_whisper=True --from_pretrained="checkpoints/small_frozen_align/latest" --wandb_mode=online --run_name "small_frozen_align_contd2k"

@@ -8,6 +8,7 @@ class TrainingArgs:
     lr_warmup_steps: int = 1000
     gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
+    from_pretrained: str = None
     output_path: str = "outputs"
     from_whisper: str = "tiny.en"
     run_name: str = None

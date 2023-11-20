@@ -263,6 +263,17 @@ class WhisperAudioEncoder(nn.Module):
         args = ModelArgs(**args)
         model = cls(args)
         model.load_state_dict(torch.load(model_file))
+        if args.freeze_whisper:
+            # freeze conv1, conv2, and blocks
+            for name, param in model.named_parameters():
+                if (
+                    name.startswith("conv1")
+                    or name.startswith("conv2")
+                    or name.startswith("blocks")
+                    or name.startswith("ln_post")
+                ):
+                    param.requires_grad = False
+                    print(f"Freezing {name}")
         return model
 
     @classmethod
