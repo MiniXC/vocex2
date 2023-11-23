@@ -6,6 +6,7 @@ import warnings
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 import numpy as np
 
 from configs.args import CollatorArgs
@@ -34,6 +35,7 @@ from whisper.audio import (
     N_SAMPLES,
     N_FRAMES,
 )
+from simple_hifigan import Synthesiser
 
 from .snr import get_snr
 from .srmr import get_srmr
@@ -354,9 +356,12 @@ def get_pitch(audio, mel_len, sampling_rate=16000):
     f0 = pw.stonemask(pitch_audio, f0, t, sampling_rate)
     f0[f0 < 0.05] = np.nan
     # interpolate missing values
-    f0 = interpolate_nan(f0)
-    # resample f0 to mel_len using scipy.signal.resample
-    f0 = signal.decimate(f0, int(len(f0) / mel_len))
+    try:
+        f0 = interpolate_nan(f0)
+        # resample f0 to mel_len using scipy.signal.resample
+        f0 = signal.decimate(f0, int(len(f0) / mel_len))
+    except ValueError:
+        f0 = np.ones(mel_len) * 0.05
     # convolutional smoothing
     # extend f0 to avoid edge effects
     f0 = np.concatenate([np.ones(4) * f0[0], f0, np.ones(4) * f0[-1]])
@@ -428,6 +433,8 @@ class VocexCollator(nn.Module):
             punctuation_marks=self.punct_symbols,
             logger=logger,
         )
+        self.synthesiser = Synthesiser()
+        self.mel_range = (-13, 3)
 
     def __call__(self, batch):
         result = {
@@ -438,6 +445,7 @@ class VocexCollator(nn.Module):
             "phone_spans": [],
             "transcript": [],
             "transcript_phonemized": [],
+            "transcript_phonemized_cond": [],
             "silences": [],
             "pitch": [],
             "energy": [],
@@ -451,8 +459,17 @@ class VocexCollator(nn.Module):
                 duration=item["duration"],
             )
             text = item["supervisions"][0]["custom"]["texts"][0]
-            mel = log_mel_spectrogram(audio, N_MELS, padding=N_SAMPLES)
-            mel_len = mel.shape[-1] - N_FRAMES
+            # pad audio with 30s of silence
+            audio_mel = torch.tensor(audio)
+            mel = self.synthesiser.wav_to_mel(audio_mel, SAMPLE_RATE)[0]
+            mel_len = mel.shape[-1]
+            mel = torch.clamp(mel, self.mel_range[0], self.mel_range[1])
+            mel = (mel - self.mel_range[0]) / (self.mel_range[1] - self.mel_range[0])
+
+            # old, whisper mel
+            # mel = log_mel_spectrogram(audio, N_MELS, padding=N_FRAMES)
+            # mel_len = mel.shape[-1] - N_FRAMES
+
             mel = pad_or_trim(mel, N_FRAMES)
             (
                 emb,
@@ -466,8 +483,14 @@ class VocexCollator(nn.Module):
             # pad to N_FRAMES (they are numpy arrays)
             pitch = np.concatenate([pitch, np.zeros(N_FRAMES - len(pitch))])
             energy = np.concatenate([energy, np.zeros(N_FRAMES - len(energy))])
-            snr = get_snr(audio)
-            srmr = get_srmr(audio)
+            try:
+                snr = get_snr(audio)
+            except ValueError:
+                snr = -1
+            try:
+                srmr = get_srmr(audio, fast=True)
+            except ValueError:
+                srmr = -1
             # print(
             #     f"SNR: {snr}, SRMR: {srmr}, pitch (mean): {pitch.mean()}, energy (mean): {energy.mean()}, pitch (std): {pitch.std()}, energy (std): {energy.std()}"
             # )
@@ -521,24 +544,38 @@ class VocexCollator(nn.Module):
             for phone in phonemized.split(" "):
                 if len(phone) > 0:
                     if phone not in self.phone2id:
+                        if phone == "aɪʊɹ":
+                            phonemized_ids.extend(
+                                [
+                                    self.phone2id["aɪ"],
+                                    self.phone2id["ʊ"],
+                                    self.phone2id["ɹ"],
+                                ]
+                            )
+                            continue
                         # find any substring of phone that is in phone2id
-                        found_substring = False
-                        for i in range(len(phone)):
-                            if phone[: len(phone) - i] in self.phone2id:
-                                phonemized_ids.append(
-                                    self.phone2id[phone[: len(phone) - i]]
-                                )
-                                found_substring = True
-                                break
-                        if not found_substring:
+                        for _ in range(4):
+                            found_substring = False
                             for i in range(len(phone)):
-                                if phone[i:] in self.phone2id:
-                                    phonemized_ids.append(self.phone2id[phone[i:]])
+                                if phone[: len(phone) - i] in self.phone2id:
+                                    phonemized_ids.append(
+                                        self.phone2id[phone[: len(phone) - i]]
+                                    )
+                                    phone = phone[len(phone) - i :]
                                     found_substring = True
                                     break
-                        if not found_substring:
-                            print(f"Could not find {phone} in phone2id")
-                            phonemized_ids.append(0)
+                            if not found_substring:
+                                for i in range(len(phone)):
+                                    if phone[i:] in self.phone2id:
+                                        phonemized_ids.append(self.phone2id[phone[i:]])
+                                        phone = phone[:i]
+                                        found_substring = True
+                                        break
+                            if not found_substring:
+                                print(f"Could not find {phone} in phone2id")
+                                phonemized_ids.append(0)
+                            if len(phone) == 0:
+                                break
                     else:
                         phonemized_ids.append(self.phone2id[phone])
             # align phonemized and phone_ids
@@ -705,13 +742,21 @@ class VocexCollator(nn.Module):
             )
             result["speaker_emb"].append(emb)
             result["transcript"].append(text)
-            # pad phonemized_ids to phone_len
+
+            phonemized_ids_cond = resample_nearest(
+                np.array(phonemized_ids), mel_len
+            ).tolist()
+            phonemized_ids_cond = phonemized_ids_cond + [0] * (
+                N_FRAMES - len(phonemized_ids_cond)
+            )
+            result["transcript_phonemized_cond"].append(phonemized_ids_cond)
+
             phonemized_ids = phonemized_ids + [0] * (
                 self.phone_len - len(phonemized_ids)
-            )
-            # if phonemized_ids is longer than phone_len, truncate it
+            )  # pad phonemized_ids to phone_len
             phonemized_ids = phonemized_ids[: self.phone_len]
             result["transcript_phonemized"].append(phonemized_ids)
+
             result["silences"].append(silences)
             # convert phone_spans to phone_ids
             phone_ids = []
@@ -730,21 +775,26 @@ class VocexCollator(nn.Module):
                     print(result)
                     print(f"KeyError: {phone}")
                     raise
-            assert len(phone_ids) == mel_len
-            # pad phone_ids to N_FRAMES
-            phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
+            if len(phone_ids) < N_FRAMES:
+                # pad phone_ids to mel_len
+                phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
             result["phone_ids"].append(phone_ids)
+            # print(
+            #     [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"],
+            #     [
+            #         self.id2phone[i]
+            #         for i in phonemized_ids_cond
+            #         if self.id2phone[i] != "<pad>"
+            #     ],
+            # )
         result["mel"] = torch.stack(result["mel"])
         result["mel_len"] = torch.tensor(result["mel_len"])
         result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)
-        print(
-            result["speaker_emb"].shape,
-            result["speaker_emb"].min(),
-            result["speaker_emb"].max(),
-            result["speaker_emb"].mean(),
-        )
         result["phone_ids"] = torch.tensor(result["phone_ids"])
         result["transcript_phonemized"] = torch.tensor(result["transcript_phonemized"])
+        result["transcript_phonemized_cond"] = torch.tensor(
+            result["transcript_phonemized_cond"]
+        )
         result["pitch"] = torch.tensor(np.array(result["pitch"]))
         result["energy"] = torch.tensor(np.array(result["energy"]))
         result["attributes"] = torch.tensor(result["attributes"])

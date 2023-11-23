@@ -100,7 +100,11 @@ def train_epoch(epoch):
         energy_loss = nn.MSELoss()(preds["energy"], energy_target)
 
         loss = (
-            phone_loss + speaker_loss + attribute_loss + pitch_loss + energy_loss
+            phone_loss
+            + speaker_loss * 10
+            + attribute_loss * 10
+            + pitch_loss * 10
+            + energy_loss * 10
         ) / 5
 
         accelerator.backward(loss)
@@ -180,21 +184,73 @@ def evaluate(device="cpu"):
         y_true = []
         y_pred = []
         losses = []
+        phone_losses = []
+        speaker_losses = []
+        attribute_losses = []
+        pitch_losses = []
+        energy_losses = []
         console_rule("Evaluation")
         for i in tqdm(range(10), desc="eval"):
             bs = training_args.batch_size
             batch = collator([val_ds[j + (i * bs)] for j in range(bs)])
-            phone_pred = eval_model(
+            mel_len = batch["mel_len"]
+            pred = eval_model(
                 batch["mel"].to(device),
                 batch["transcript_phonemized"].to(device),
-            ).permute(0, 2, 1)
+            )
             phone_ids = batch["phone_ids"].to(device)
-            loss = loss_func(phone_pred, phone_ids)
+            phone_pred = pred["phones"]
+            phone_loss = loss_func(phone_pred.permute(0, 2, 1), phone_ids)
+            speaker_loss = nn.MSELoss()(
+                pred["speaker_emb"], batch["speaker_emb"].to(device)
+            )
+            attribute_loss = nn.MSELoss()(
+                pred["attributes"], batch["attributes"].to(device)
+            )
+            pitch_loss = nn.MSELoss()(pred["pitch"], batch["pitch"].to(device))
+            energy_loss = nn.MSELoss()(pred["energy"], batch["energy"].to(device))
+            loss = (
+                phone_loss
+                + speaker_loss * 10
+                + attribute_loss * 10
+                + pitch_loss * 10
+                + energy_loss * 10
+            ) / 5
             losses.append(loss.item())
-            phone_pred = phone_pred.permute(0, 2, 1).argmax(dim=-1)
+            phone_losses.append(phone_loss.item())
+            speaker_losses.append(speaker_loss.item())
+            attribute_losses.append(attribute_loss.item())
+            pitch_losses.append(pitch_loss.item())
+            energy_losses.append(energy_loss.item())
+            # eval_model.forced_align(
+            #     phone_pred[0][: mel_len[0]], phone_ids[0][: mel_len[0]]
+            # )
+            phone_pred = phone_pred.argmax(dim=-1)
             for j in range(bs):
                 if i == 0 and j == 0:
-                    pass
+                    fig = plot_item(
+                        batch["mel"][j],
+                        batch["phone_spans"][j],
+                        batch["mel_len"][j],
+                        training_args,
+                        batch["silences"][j],
+                    )
+                    fig.savefig("figures/eval.png")
+                    fig = plot_predictions(
+                        batch["mel"][j],
+                        batch["mel_len"][j],
+                        phone_pred[j],
+                        collator.id2phone,
+                        training_args,
+                    )
+                    fig.savefig("figures/eval_pred.png")
+                    wandb.log(
+                        {
+                            "eval/alignment": wandb.Image("figures/eval.png"),
+                            "eval/predictions": wandb.Image("figures/eval_pred.png"),
+                        },
+                        step=global_step,
+                    )
                 y_pred.append(phone_pred[j])
                 y_true.append(phone_ids[j])
                 # convert to strings for cer
@@ -230,6 +286,11 @@ def evaluate(device="cpu"):
         cer = cer_metric.compute()
         cer_transcript = cer_metric_transcript.compute()
         loss = np.mean(losses)
+        phone_loss = np.mean(phone_losses)
+        speaker_loss = np.mean(speaker_losses)
+        attribute_loss = np.mean(attribute_losses)
+        pitch_loss = np.mean(pitch_losses)
+        energy_loss = np.mean(energy_losses)
         wandb_log(
             "val",
             {
@@ -240,6 +301,11 @@ def evaluate(device="cpu"):
                 "precision": precision,
                 "recall": recall,
                 "loss": loss,
+                "phone_loss": phone_loss,
+                "speaker_loss": speaker_loss,
+                "attribute_loss": attribute_loss,
+                "pitch_loss": pitch_loss,
+                "energy_loss": energy_loss,
             },
             print_log=True,
         )
@@ -303,7 +369,7 @@ def main():
 
     # model
     if training_args.from_pretrained is not None:
-        model = MODEL_CLASS.from_pretrained(training_args.from_pretrained)
+        model = MODEL_CLASS.from_pretrained(training_args.from_pretrained, strict=False)
     elif training_args.from_whisper is not None and training_args.from_whisper not in [
         "None",
         "none",
@@ -356,13 +422,6 @@ def main():
         first_batch = collator([train_ds[i] for i in range(training_args.batch_size)])
         plot_first_batch(first_batch, training_args)
         plt.savefig("figures/first_batch.png")
-        plot_predictions(
-            first_batch["mel"][0],
-            first_batch["mel_len"][0],
-            first_batch["phone_ids"][0],
-            collator.id2phone,
-            training_args,
-        )
 
     # dataloader
     train_dl = DataLoader(

@@ -54,7 +54,7 @@ def plot_predictions(mel, mel_len, pred_phone_ids, id2phone, args: TrainingArgs)
                 phone_spans[-2][2] = start
         start += 1
     phone_spans = [
-        [id2phone[phone_id], start, end] for phone_id, start, end in phone_spans
+        [id2phone[phone_id], (start, end)] for phone_id, start, end in phone_spans
     ]
     fig = plot_item(mel, phone_spans, mel_len, args)
     return fig

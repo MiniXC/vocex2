@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainingArgs:
-    lr: float = 1e-4
+    lr: float = 1e-5
     lr_schedule: str = "linear_with_warmup"
     lr_warmup_steps: int = 1000
     gradient_clip_val: float = 1.0
@@ -47,7 +47,8 @@ class ModelArgs:
     n_state: int = 384
     n_head: int = 6
     n_layer: int = 4
-    n_postnet_layers: int = 8
+    n_phonenet_layers: int = 2
+    n_postnet_layers: int = 4
     prosody_postnet_layers: int = 4
     speaker_postnet_layers: int = 4
     speaker_emb_dim: int = 192

@@ -208,6 +208,8 @@ class WhisperAudioEncoder(nn.Module):
         self.speaker_mlp = SpeakerMLP(n_state, speaker_postnet_layers, speaker_emb_dim)
 
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
+        # position embedding for postnet cross attention
+        self.register_buffer("phonenet_positional_embedding", sinusoids(500, n_state))
 
         self.postnet_upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
@@ -217,13 +219,25 @@ class WhisperAudioEncoder(nn.Module):
             n_state, args.prosody_postnet_layers, args.n_attributes
         )
 
+        self.phonenet = nn.Sequential(
+            *[
+                ResidualAttentionBlock(n_state, n_head, cross_attention=False)
+                for _ in range(args.n_phonenet_layers // 2)
+            ]
+        )
+
         self.postnet = nn.Sequential(
             *[
                 ResidualAttentionBlock(n_state, n_head, cross_attention=True)
                 for _ in range(args.n_postnet_layers)
             ]
         )
-        self.phone_out = nn.Linear(n_state, args.n_phones)
+
+        self.phone_out = nn.Sequential(
+            Linear(n_state, n_state * 4),
+            nn.GELU(),
+            Linear(n_state * 4, args.n_phones),
+        )
 
         self.apply(self._init_weights)
 
@@ -279,14 +293,14 @@ class WhisperAudioEncoder(nn.Module):
         attributes = self.attributes_mlp(x)
 
         # postnet
-        if phone_ids is None:
-            phone_ids = torch.zeros(
-                x.shape[0], dtype=torch.long, device=x.device
-            ).unsqueeze(-1)
+        # if phone_ids is None:
+        # phone_ids = torch.zeros(x.shape[0], 500, dtype=torch.long).to(x.device)
         phone_emb = self.postnet_phone_emb(phone_ids)
+        phone_emb = phone_emb + self.phonenet_positional_embedding
+        phone_emb = self.phonenet(phone_emb)
 
         for block in self.postnet:
-            x = block(x, phone_emb)
+            x = block(x, xa=phone_emb)
 
         x = self.phone_out(x)
 
@@ -309,7 +323,7 @@ class WhisperAudioEncoder(nn.Module):
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
 
     @classmethod
-    def from_pretrained(cls, path_or_hubid):
+    def from_pretrained(cls, path_or_hubid, strict=True):
         # special cases
         if path_or_hubid == "distil-whisper/distil-large-v2":
             model_file = cached_file(path_or_hubid, "pytorch_model.bin")
@@ -323,7 +337,7 @@ class WhisperAudioEncoder(nn.Module):
         args = yaml.load(open(config_file, "r"), Loader=yaml.Loader)
         args = ModelArgs(**args)
         model = cls(args)
-        model.load_state_dict(torch.load(model_file))
+        model.load_state_dict(torch.load(model_file), strict=strict)
         if args.freeze_whisper:
             # freeze conv1, conv2, and blocks
             for name, param in model.named_parameters():
@@ -360,5 +374,5 @@ class WhisperAudioEncoder(nn.Module):
         torch.manual_seed(0)
         return [
             torch.randn(1, self.args.n_mels, self.args.n_ctx * 2),
-            torch.zeros(1, 1, dtype=torch.long),
+            torch.zeros(1, 500, dtype=torch.long),
         ]
