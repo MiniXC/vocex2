@@ -92,7 +92,10 @@ def train_epoch(epoch):
             phone_cond,
         )
 
-        phone_loss = loss_func(preds["phones"].permute(0, 2, 1), phone_target)
+        # use cross entropy for phone targets (with label smoothing)
+        phone_loss = torch.nn.functional.cross_entropy(
+            preds["phones"].permute(0, 2, 1), phone_target
+        )
         # use mse for all other targets
         speaker_loss = nn.MSELoss()(preds["speaker_emb"], speaker_target)
         attribute_loss = nn.MSELoss()(preds["attributes"], attribute_target)
@@ -194,13 +197,20 @@ def evaluate(device="cpu"):
             bs = training_args.batch_size
             batch = collator([val_ds[j + (i * bs)] for j in range(bs)])
             mel_len = batch["mel_len"]
+            # forward pass
+            from time import time
+
+            start = time()
             pred = eval_model(
                 batch["mel"].to(device),
                 batch["transcript_phonemized"].to(device),
             )
+            print(f"forward pass took {time()-start:.3f}s")
             phone_ids = batch["phone_ids"].to(device)
             phone_pred = pred["phones"]
-            phone_loss = loss_func(phone_pred.permute(0, 2, 1), phone_ids)
+            phone_loss = torch.nn.functional.cross_entropy(
+                phone_pred.permute(0, 2, 1), phone_ids
+            )
             speaker_loss = nn.MSELoss()(
                 pred["speaker_emb"], batch["speaker_emb"].to(device)
             )
@@ -222,10 +232,30 @@ def evaluate(device="cpu"):
             attribute_losses.append(attribute_loss.item())
             pitch_losses.append(pitch_loss.item())
             energy_losses.append(energy_loss.item())
-            # eval_model.forced_align(
-            #     phone_pred[0][: mel_len[0]], phone_ids[0][: mel_len[0]]
-            # )
-            phone_pred = phone_pred.argmax(dim=-1)
+            align_list = []
+            for item in batch["transcript_phonemized"]:
+                item = [x for x in item if x != 0]
+                align_list.append(item)
+            phone_pred_new = []
+            for j in range(bs):
+                pred_new = eval_model.decode(
+                    phone_pred[j].unsqueeze(0),
+                    torch.tensor(mel_len[j]).unsqueeze(0),
+                    [align_list[j]],
+                )
+                if len(pred_new) == 0:
+                    pred_new = [[0]]
+                phone_pred_new.append(pred_new[0])
+            # for each list in phone_pred, replace -1 with 0, and pad to max length
+            phone_pred = [
+                np.pad(
+                    np.array([0 if x == -1 else x for x in item]),
+                    (0, 3000 - len(item)),
+                    constant_values=0,
+                )
+                for item in phone_pred_new
+            ]
+            print(phone_pred)
             for j in range(bs):
                 if i == 0 and j == 0:
                     fig = plot_item(
@@ -254,10 +284,10 @@ def evaluate(device="cpu"):
                 y_pred.append(phone_pred[j])
                 y_true.append(phone_ids[j])
                 # convert to strings for cer
-                phone_pred_s = "".join([chr(x) for x in phone_pred[j].tolist()])
-                phone_true_s = "".join([chr(x) for x in phone_ids[j].tolist()])
+                phone_pred_s = "".join([chr(x + 97) for x in phone_pred[j].tolist()])
+                phone_true_s = "".join([chr(x + 97) for x in phone_ids[j].tolist()])
                 phone_true_s_transcript = "".join(
-                    [chr(x) for x in batch["transcript_phonemized"][j].tolist()]
+                    [chr(x + 97) for x in batch["transcript_phonemized"][j].tolist()]
                 )
                 # remove repeated characters
                 phone_pred_s = "".join(
@@ -312,13 +342,11 @@ def evaluate(device="cpu"):
 
 
 def main():
-    global accelerator, training_args, model_args, collator, val_ds, collator_args, train_dl, optimizer, scheduler, model, global_step, pbar, loss_func
+    global accelerator, training_args, model_args, collator, val_ds, collator_args, train_dl, optimizer, scheduler, model, global_step, pbar
 
     global_step = 0
 
     accelerator = Accelerator()
-
-    loss_func = torch.nn.functional.cross_entropy
 
     # parse args
     (
@@ -369,7 +397,11 @@ def main():
 
     # model
     if training_args.from_pretrained is not None:
-        model = MODEL_CLASS.from_pretrained(training_args.from_pretrained, strict=False)
+        model = MODEL_CLASS.from_pretrained(
+            training_args.from_pretrained,
+            strict=False,
+            freeze_whisper=model_args.freeze_whisper,
+        )
     elif training_args.from_whisper is not None and training_args.from_whisper not in [
         "None",
         "none",

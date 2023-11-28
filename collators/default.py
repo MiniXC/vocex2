@@ -779,14 +779,6 @@ class VocexCollator(nn.Module):
                 # pad phone_ids to mel_len
                 phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
             result["phone_ids"].append(phone_ids)
-            # print(
-            #     [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"],
-            #     [
-            #         self.id2phone[i]
-            #         for i in phonemized_ids_cond
-            #         if self.id2phone[i] != "<pad>"
-            #     ],
-            # )
         result["mel"] = torch.stack(result["mel"])
         result["mel_len"] = torch.tensor(result["mel_len"])
         result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)

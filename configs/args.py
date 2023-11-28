@@ -3,9 +3,9 @@ from dataclasses import dataclass
 
 @dataclass
 class TrainingArgs:
-    lr: float = 1e-5
+    lr: float = 5e-5
     lr_schedule: str = "linear_with_warmup"
-    lr_warmup_steps: int = 1000
+    lr_warmup_steps: int = 500
     gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
     from_pretrained: str = None
@@ -17,8 +17,8 @@ class TrainingArgs:
     wandb_dir: str = "wandb"
     libriheavy_size: str = "small"
     libriheavy_path: str = "/dev/shm/libriheavy-small"
-    n_steps: int = 50000
-    batch_size: int = 4
+    n_steps: int = 100000
+    batch_size: int = 2
     seed: int = 0
     log_every_n_steps: int = 100
     do_full_eval: bool = True
@@ -48,9 +48,9 @@ class ModelArgs:
     n_head: int = 6
     n_layer: int = 4
     n_phonenet_layers: int = 2
-    n_postnet_layers: int = 4
-    prosody_postnet_layers: int = 4
-    speaker_postnet_layers: int = 4
+    n_postnet_layers: int = 2
+    prosody_postnet_layers: int = 2
+    speaker_postnet_layers: int = 2
     speaker_emb_dim: int = 192
     n_phones: int = 403
     n_attributes: int = 6

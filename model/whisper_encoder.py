@@ -10,6 +10,7 @@ from torch import nn
 from transformers.utils.hub import cached_file
 from rich.console import Console
 from whisper import load_model
+import k2
 
 console = Console()
 
@@ -25,16 +26,14 @@ class Linear(nn.Linear):
     def forward(self, x):
         return F.linear(
             x,
-            self.weight.to(x.dtype),
-            None if self.bias is None else self.bias.to(x.dtype),
+            self.weight,
+            None if self.bias is None else self.bias,
         )
 
 
 class Conv1d(nn.Conv1d):
     def _conv_forward(self, x, weight, bias):
-        return super()._conv_forward(
-            x, weight.to(x.dtype), None if bias is None else bias.to(x.dtype)
-        )
+        return super()._conv_forward(x, weight, None if bias is None else bias)
 
 
 def sinusoids(length, channels, max_timescale=10000):
@@ -89,7 +88,7 @@ class MultiHeadAttention(nn.Module):
             qk = qk + mask[:n_ctx, :n_ctx]
         qk = qk.float()
 
-        w = F.softmax(qk, dim=-1).to(q.dtype)
+        w = F.softmax(qk, dim=-1)
         return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2), qk.detach()
 
 
@@ -199,7 +198,10 @@ class WhisperAudioEncoder(nn.Module):
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
 
         self.blocks = nn.ModuleList(
-            [ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)]
+            [
+                ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+                for _ in range(n_layer)
+            ]
         )
         self.ln_post = LayerNorm(n_state)
 
@@ -222,7 +224,7 @@ class WhisperAudioEncoder(nn.Module):
         self.phonenet = nn.Sequential(
             *[
                 ResidualAttentionBlock(n_state, n_head, cross_attention=False)
-                for _ in range(args.n_phonenet_layers // 2)
+                for _ in range(args.n_phonenet_layers)
             ]
         )
 
@@ -233,11 +235,9 @@ class WhisperAudioEncoder(nn.Module):
             ]
         )
 
-        self.phone_out = nn.Sequential(
-            Linear(n_state, n_state * 4),
-            nn.GELU(),
-            Linear(n_state * 4, args.n_phones),
-        )
+        self.ln_phone = LayerNorm(n_state)
+
+        self.phone_out = Linear(n_state, args.n_phones)
 
         self.apply(self._init_weights)
 
@@ -267,9 +267,14 @@ class WhisperAudioEncoder(nn.Module):
         x = x.permute(0, 2, 1)
 
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
-        x = (x + self.positional_embedding).to(x.dtype)
+        x = x + self.positional_embedding
+
+        # phone_emb = self.postnet_phone_emb(phone_ids)
+        # phone_emb = phone_emb + self.phonenet_positional_embedding
+        # phone_emb = self.phonenet(phone_emb)
 
         for block in self.blocks:
+            # x = block(x, xa=phone_emb)
             x = block(x)
 
         x = self.ln_post(x)
@@ -293,15 +298,12 @@ class WhisperAudioEncoder(nn.Module):
         attributes = self.attributes_mlp(x)
 
         # postnet
-        # if phone_ids is None:
-        # phone_ids = torch.zeros(x.shape[0], 500, dtype=torch.long).to(x.device)
-        phone_emb = self.postnet_phone_emb(phone_ids)
-        phone_emb = phone_emb + self.phonenet_positional_embedding
-        phone_emb = self.phonenet(phone_emb)
-
         for block in self.postnet:
-            x = block(x, xa=phone_emb)
+            # x = block(x, xa=phone_emb)
+            x = block(x)
 
+        x = self.ln_phone(x)
+        # x = x @ torch.transpose(self.postnet_phone_emb.weight, 0, 1)
         x = self.phone_out(x)
 
         return {
@@ -311,6 +313,67 @@ class WhisperAudioEncoder(nn.Module):
             "energy": energy,
             "attributes": attributes,
         }
+
+    def decode(self, log_prob, log_prob_len, targets):
+        """
+        Align targets to log_probs.
+
+        Arguments
+        ---------
+        log_prob: torch.Tensor
+            A tensor of shape (N, T, C) containing the log-probabilities.
+            Please make sure that index 0 of the C dimension corresponds
+            to the blank symbol.
+        log_prob_len: torch.Tensor
+            A tensor of shape (N,) containing the lengths of the log_probs.
+            This is needed because the log_probs may have been padded.
+            All elements in this tensor must be integers and <= T.
+        targets: list
+            A list of list of integers containing the targets.
+            Note that the targets should not contain the blank symbol.
+            The blank symbol is assumed to be index 0 in log_prob.
+        Returns
+        -------
+        alignments: List[List[int]], containing the alignments.
+        """
+        assert log_prob.ndim == 3
+        assert log_prob_len.ndim == 1
+        assert log_prob.shape[0] == log_prob_len.shape[0]
+        assert isinstance(targets, list)
+        assert isinstance(targets[0], list)
+        assert log_prob.shape[0] == len(targets)
+
+        log_prob = torch.log_softmax(log_prob, dim=-1)
+
+        N, T, C = log_prob.shape
+
+        from time import time
+
+        start = time()
+
+        graph = k2.ctc_graph(targets, modified=True)
+
+        lattice = k2.get_lattice(
+            log_prob=log_prob,
+            log_prob_len=log_prob_len,
+            decoding_graph=graph,
+        )
+
+        best_path = k2.shortest_path(lattice, use_double_scores=True)
+        labels = best_path.labels
+
+        alignments = []
+        alignment = []
+        for e in labels.tolist():
+            if e == -1:
+                alignments.append(alignment)
+                alignment = []
+            else:
+                alignment.append(e)
+
+        print(f"decode time: {time() - start:.3f}s")
+
+        return alignments
 
     def save_model(self, path, accelerator=None):
         path = Path(path)
@@ -323,7 +386,7 @@ class WhisperAudioEncoder(nn.Module):
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
 
     @classmethod
-    def from_pretrained(cls, path_or_hubid, strict=True):
+    def from_pretrained(cls, path_or_hubid, strict=True, freeze_whisper=True):
         # special cases
         if path_or_hubid == "distil-whisper/distil-large-v2":
             model_file = cached_file(path_or_hubid, "pytorch_model.bin")
@@ -338,7 +401,9 @@ class WhisperAudioEncoder(nn.Module):
         args = ModelArgs(**args)
         model = cls(args)
         model.load_state_dict(torch.load(model_file), strict=strict)
+        args.freeze_whisper = freeze_whisper
         if args.freeze_whisper:
+            print("Freezing whisper model")
             # freeze conv1, conv2, and blocks
             for name, param in model.named_parameters():
                 if (
@@ -348,7 +413,6 @@ class WhisperAudioEncoder(nn.Module):
                     or name.startswith("ln_post")
                 ):
                     param.requires_grad = False
-                    print(f"Freezing {name}")
         return model
 
     @classmethod
