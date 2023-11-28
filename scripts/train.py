@@ -94,20 +94,27 @@ def train_epoch(epoch):
 
         # use cross entropy for phone targets (with label smoothing)
         phone_loss = torch.nn.functional.cross_entropy(
-            preds["phones"].permute(0, 2, 1), phone_target
-        )
+            preds["phones"].permute(0, 2, 1), phone_target, reduction="none"
+        ) * batch["loss_mask"]
+        phone_loss = phone_loss.sum() / batch["loss_mask"].sum()
         # use mse for all other targets
         speaker_loss = nn.MSELoss()(preds["speaker_emb"], speaker_target)
         attribute_loss = nn.MSELoss()(preds["attributes"], attribute_target)
-        pitch_loss = nn.MSELoss()(preds["pitch"], pitch_target)
-        energy_loss = nn.MSELoss()(preds["energy"], energy_target)
+        pitch_loss = nn.MSELoss()(preds["pitch"], pitch_target, reduction="none") * (
+            batch["pitch_mask"]
+        )
+        pitch_loss = pitch_loss.sum() / batch["loss_mask"].sum()
+        energy_loss = nn.MSELoss()(preds["energy"], energy_target, reduction="none") * (
+            batch["energy_mask"]
+        )
+        energy_loss = energy_loss.sum() / batch["loss_mask"].sum()
 
         loss = (
             phone_loss
-            + speaker_loss * 10
-            + attribute_loss * 10
-            + pitch_loss * 10
-            + energy_loss * 10
+            + speaker_loss * 5
+            + attribute_loss * 5
+            + pitch_loss * 5
+            + energy_loss * 5
         ) / 5
 
         accelerator.backward(loss)

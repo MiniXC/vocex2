@@ -450,6 +450,7 @@ class VocexCollator(nn.Module):
             "pitch": [],
             "energy": [],
             "attributes": [],  # snr, srmr, pitch mean, pitch std, energy mean, energy std
+            "loss_mask": [],
         }
         for item in batch:
             file_path = self.libriheavy_path / item["recording"]["sources"][0]["source"]
@@ -465,6 +466,14 @@ class VocexCollator(nn.Module):
             mel_len = mel.shape[-1]
             mel = torch.clamp(mel, self.mel_range[0], self.mel_range[1])
             mel = (mel - self.mel_range[0]) / (self.mel_range[1] - self.mel_range[0])
+
+            loss_mask = torch.ones(mel_len)
+            loss_mask = torch.cat(
+                [
+                    loss_mask,
+                    torch.zeros(N_FRAMES - mel_len),
+                ]
+            )
 
             # old, whisper mel
             # mel = log_mel_spectrogram(audio, N_MELS, padding=N_FRAMES)
@@ -779,6 +788,7 @@ class VocexCollator(nn.Module):
                 # pad phone_ids to mel_len
                 phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
             result["phone_ids"].append(phone_ids)
+            result["loss_mask"].append(loss_mask)
         result["mel"] = torch.stack(result["mel"])
         result["mel_len"] = torch.tensor(result["mel_len"])
         result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)
@@ -790,4 +800,5 @@ class VocexCollator(nn.Module):
         result["pitch"] = torch.tensor(np.array(result["pitch"]))
         result["energy"] = torch.tensor(np.array(result["energy"]))
         result["attributes"] = torch.tensor(result["attributes"])
+        result["loss_mask"] = torch.stack(result["loss_mask"])
         return result
