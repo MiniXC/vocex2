@@ -100,12 +100,12 @@ def train_epoch(epoch):
         # use mse for all other targets
         speaker_loss = nn.MSELoss()(preds["speaker_emb"], speaker_target)
         attribute_loss = nn.MSELoss()(preds["attributes"], attribute_target)
-        pitch_loss = nn.MSELoss()(preds["pitch"], pitch_target, reduction="none") * (
-            batch["pitch_mask"]
+        pitch_loss = nn.MSELoss(reduction="none")(preds["pitch"], pitch_target) * (
+            batch["loss_mask"]
         )
         pitch_loss = pitch_loss.sum() / batch["loss_mask"].sum()
-        energy_loss = nn.MSELoss()(preds["energy"], energy_target, reduction="none") * (
-            batch["energy_mask"]
+        energy_loss = nn.MSELoss(reduction="none")(preds["energy"], energy_target) * (
+            batch["loss_mask"]
         )
         energy_loss = energy_loss.sum() / batch["loss_mask"].sum()
 
