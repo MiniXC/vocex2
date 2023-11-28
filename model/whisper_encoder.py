@@ -269,13 +269,12 @@ class WhisperAudioEncoder(nn.Module):
         assert x.shape[1:] == self.positional_embedding.shape, "incorrect audio shape"
         x = x + self.positional_embedding
 
-        # phone_emb = self.postnet_phone_emb(phone_ids)
-        # phone_emb = phone_emb + self.phonenet_positional_embedding
-        # phone_emb = self.phonenet(phone_emb)
+        phone_emb = self.postnet_phone_emb(phone_ids)
+        phone_emb = phone_emb + self.phonenet_positional_embedding
+        phone_emb = self.phonenet(phone_emb)
 
         for block in self.blocks:
-            # x = block(x, xa=phone_emb)
-            x = block(x)
+            x = block(x, xa=phone_emb)
 
         x = self.ln_post(x)
 
@@ -299,12 +298,10 @@ class WhisperAudioEncoder(nn.Module):
 
         # postnet
         for block in self.postnet:
-            # x = block(x, xa=phone_emb)
-            x = block(x)
+            x = block(x, xa=phone_emb)
 
         x = self.ln_phone(x)
-        # x = x @ torch.transpose(self.postnet_phone_emb.weight, 0, 1)
-        x = self.phone_out(x)
+        x = x @ torch.transpose(self.postnet_phone_emb.weight, 0, 1)
 
         return {
             "phones": x,
