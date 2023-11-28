@@ -18,7 +18,7 @@ torchaudio==0.13.1
 tqdm==4.66.1
 transformers==4.35.0
 wandb==0.15.8
-phonemizer==3.2.1
+phonemizer @ git+https://github.com/MiniXC/phonemizer-object.git
 nemo_toolkit [all] == 1.21.0
 openai-whisper==20231117
 simple-hifigan @ git+https://github.com/MiniXC/simple_hifigan.git
