@@ -78,8 +78,17 @@ def train_epoch(epoch):
     last_loss = None
 
     for batch in train_dl:
+        if batch is None:
+            continue
         mel_input = batch["mel"]
         phone_cond = batch["transcript_phonemized"]
+        phone_mask = batch["transcript_mask"]
+
+        # 25% of the time, mask out parts of the mel to encourage the model to learn from the phone condition
+        if np.random.rand() < 0.25:
+            mel_mask = torch.rand((mel_input.shape[0], mel_input.shape[2])) > 0.5
+            mel_mask = mel_mask.unsqueeze(1).repeat(1, mel_input.shape[1], 1)
+            mel_input = mel_input * mel_mask
 
         phone_target = batch["phone_ids"]
         speaker_target = batch["speaker_emb"]
@@ -90,6 +99,7 @@ def train_epoch(epoch):
         preds = model(
             mel_input,
             phone_cond,
+            phone_mask,
         )
 
         # use cross entropy for phone targets (with label smoothing)
@@ -211,27 +221,35 @@ def evaluate(device="cpu"):
             pred = eval_model(
                 batch["mel"].to(device),
                 batch["transcript_phonemized"].to(device),
+                batch["transcript_mask"].to(device),
             )
             print(f"forward pass took {time()-start:.3f}s")
             phone_ids = batch["phone_ids"].to(device)
             phone_pred = pred["phones"]
             phone_loss = torch.nn.functional.cross_entropy(
-                phone_pred.permute(0, 2, 1), phone_ids
-            )
+                phone_pred.permute(0, 2, 1), phone_ids, reduction="none"
+            ) * batch["loss_mask"].to(device)
+            phone_loss = phone_loss.sum() / batch["loss_mask"].sum()
             speaker_loss = nn.MSELoss()(
                 pred["speaker_emb"], batch["speaker_emb"].to(device)
             )
             attribute_loss = nn.MSELoss()(
                 pred["attributes"], batch["attributes"].to(device)
             )
-            pitch_loss = nn.MSELoss()(pred["pitch"], batch["pitch"].to(device))
-            energy_loss = nn.MSELoss()(pred["energy"], batch["energy"].to(device))
+            pitch_loss = nn.MSELoss(reduction="none")(
+                pred["pitch"], batch["pitch"].to(device)
+            ) * batch["loss_mask"].to(device)
+            pitch_loss = pitch_loss.sum() / batch["loss_mask"].sum()
+            energy_loss = nn.MSELoss(reduction="none")(
+                pred["energy"], batch["energy"].to(device)
+            ) * batch["loss_mask"].to(device)
+            energy_loss = energy_loss.sum() / batch["loss_mask"].sum()
             loss = (
                 phone_loss
-                + speaker_loss * 10
-                + attribute_loss * 10
-                + pitch_loss * 10
-                + energy_loss * 10
+                + speaker_loss * 5
+                + attribute_loss * 5
+                + pitch_loss * 5
+                + energy_loss * 5
             ) / 5
             losses.append(loss.item())
             phone_losses.append(phone_loss.item())

@@ -106,7 +106,7 @@ class ResidualAttentionBlock(nn.Module):
 
         n_mlp = n_state * 4
         self.mlp = nn.Sequential(
-            Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
+            Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state), nn.Dropout(0.1),
         )
         self.mlp_ln = LayerNorm(n_state)
 
@@ -199,7 +199,7 @@ class WhisperAudioEncoder(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+                ResidualAttentionBlock(n_state, n_head, cross_attention=False)
                 for _ in range(n_layer)
             ]
         )
@@ -212,6 +212,11 @@ class WhisperAudioEncoder(nn.Module):
         self.postnet_phone_emb = nn.Embedding(args.n_phones, n_state)
         # position embedding for postnet cross attention
         self.register_buffer("phonenet_positional_embedding", sinusoids(500, n_state))
+
+        self.cross_attention = nn.MultiheadAttention(
+            n_state, n_head, dropout=0.1, batch_first=True,
+        )
+        self.cross_attention_proj = Linear(n_state, n_state)
 
         self.postnet_upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
@@ -230,7 +235,7 @@ class WhisperAudioEncoder(nn.Module):
 
         self.postnet = nn.Sequential(
             *[
-                ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+                ResidualAttentionBlock(n_state, n_head, cross_attention=False)
                 for _ in range(args.n_postnet_layers)
             ]
         )
@@ -257,7 +262,7 @@ class WhisperAudioEncoder(nn.Module):
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
 
-    def forward(self, x, phone_ids=None):
+    def forward(self, x, phone_ids=None, phone_mask=None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
@@ -270,11 +275,19 @@ class WhisperAudioEncoder(nn.Module):
         x = x + self.positional_embedding
 
         phone_emb = self.postnet_phone_emb(phone_ids)
+        assert phone_emb.shape[1:] == self.phonenet_positional_embedding.shape, (
+            "incorrect phone shape"
+        )
         phone_emb = phone_emb + self.phonenet_positional_embedding
-        phone_emb = self.phonenet(phone_emb)
+        phone_emb = self.phonenet(phone_emb) * phone_mask.unsqueeze(-1)
 
         for block in self.blocks:
-            x = block(x, xa=phone_emb)
+            x = x + self.cross_attention_proj(self.cross_attention(
+                query=x,
+                key=phone_emb,
+                value=phone_emb,
+            )[0])
+            x = block(x)
 
         x = self.ln_post(x)
 
@@ -298,9 +311,14 @@ class WhisperAudioEncoder(nn.Module):
 
         # postnet
         for block in self.postnet:
-            x = block(x, xa=phone_emb)
+            x = x + self.cross_attention_proj(self.cross_attention(
+                query=x,
+                key=phone_emb,
+                value=phone_emb,
+            )[0])
+            x = block(x)
 
-        x = self.ln_phone(x)
+        # x = self.ln_phone(x)
         x = x @ torch.transpose(self.postnet_phone_emb.weight, 0, 1)
 
         return {
@@ -436,4 +454,5 @@ class WhisperAudioEncoder(nn.Module):
         return [
             torch.randn(1, self.args.n_mels, self.args.n_ctx * 2),
             torch.zeros(1, 500, dtype=torch.long),
+            torch.ones(1, 500, dtype=torch.bool),
         ]

@@ -445,6 +445,7 @@ class VocexCollator(nn.Module):
             "phone_spans": [],
             "transcript": [],
             "transcript_phonemized": [],
+            "transcript_mask": [],
             "transcript_phonemized_cond": [],
             "silences": [],
             "pitch": [],
@@ -452,353 +453,364 @@ class VocexCollator(nn.Module):
             "attributes": [],  # snr, srmr, pitch mean, pitch std, energy mean, energy std
             "loss_mask": [],
         }
-        for item in batch:
-            file_path = self.libriheavy_path / item["recording"]["sources"][0]["source"]
-            audio = load_audio(
-                file_path,
-                start=item["start"],
-                duration=item["duration"],
-            )
-            text = item["supervisions"][0]["custom"]["texts"][0]
-            # pad audio with 30s of silence
-            audio_mel = torch.tensor(audio)
-            mel = self.synthesiser.wav_to_mel(audio_mel, SAMPLE_RATE)[0]
-            mel_len = mel.shape[-1]
-            mel = torch.clamp(mel, self.mel_range[0], self.mel_range[1])
-            mel = (mel - self.mel_range[0]) / (self.mel_range[1] - self.mel_range[0])
+        try:
+            for item in batch:
+                file_path = self.libriheavy_path / item["recording"]["sources"][0]["source"]
+                audio = load_audio(
+                    file_path,
+                    start=item["start"],
+                    duration=item["duration"],
+                )
+                text = item["supervisions"][0]["custom"]["texts"][0]
+                # pad audio with 30s of silence
+                audio_mel = torch.tensor(audio)
+                mel = self.synthesiser.wav_to_mel(audio_mel, SAMPLE_RATE)[0]
+                mel_len = mel.shape[-1]
+                mel = torch.clamp(mel, self.mel_range[0], self.mel_range[1])
+                mel = (mel - self.mel_range[0]) / (self.mel_range[1] - self.mel_range[0])
 
-            loss_mask = torch.ones(mel_len)
-            loss_mask = torch.cat(
-                [
-                    loss_mask,
-                    torch.zeros(N_FRAMES - mel_len),
-                ]
-            )
+                loss_mask = torch.ones(mel_len)
+                loss_mask = torch.cat(
+                    [
+                        loss_mask,
+                        torch.zeros(N_FRAMES - mel_len),
+                    ]
+                )
 
-            # old, whisper mel
-            # mel = log_mel_spectrogram(audio, N_MELS, padding=N_FRAMES)
-            # mel_len = mel.shape[-1] - N_FRAMES
+                # old, whisper mel
+                # mel = log_mel_spectrogram(audio, N_MELS, padding=N_FRAMES)
+                # mel_len = mel.shape[-1] - N_FRAMES
 
-            mel = pad_or_trim(mel, N_FRAMES)
-            (
-                emb,
-                _,
-            ) = get_speaker_embedding(self.speaker_model, audio)
-            # pitch, energy, etc
-            pitch = get_pitch(audio, mel_len)
-            energy = get_energy(mel, mel_len)
-            assert len(pitch) == mel_len
-            assert len(energy) == mel_len
-            # pad to N_FRAMES (they are numpy arrays)
-            pitch = np.concatenate([pitch, np.zeros(N_FRAMES - len(pitch))])
-            energy = np.concatenate([energy, np.zeros(N_FRAMES - len(energy))])
-            try:
-                snr = get_snr(audio)
-            except ValueError:
-                snr = -1
-            try:
-                srmr = get_srmr(audio, fast=True)
-            except ValueError:
-                srmr = -1
-            # print(
-            #     f"SNR: {snr}, SRMR: {srmr}, pitch (mean): {pitch.mean()}, energy (mean): {energy.mean()}, pitch (std): {pitch.std()}, energy (std): {energy.std()}"
-            # )
-            phone_input = self.phone_processor(
-                audio, return_tensors="pt", sampling_rate=SAMPLE_RATE
-            ).input_values
-            with torch.no_grad():
-                logits = self.phone_model(phone_input).logits
-            phone_ids = torch.argmax(logits, dim=-1)[0].numpy()
-            # remove repeated phone_ids
-            phone_ids = resample_nearest(phone_ids, mel_len)
-            phone_ids = fill_sequence(phone_ids)
-            phone_start_end_idxs = []
-            phone_start = 0
-            for i in range(len(phone_ids) - 1):
-                if phone_ids[i] != phone_ids[i + 1]:
-                    phone_start_end_idxs.append((phone_start, i + 1))
-                    phone_start = i + 1
-            phone_start_end_idxs.append((phone_start, len(phone_ids)))
-            # deduplicate phone_ids
-            phone_ids = [phone_ids[start] for start, _ in phone_start_end_idxs]
-            ctc_phones = " ".join(
-                [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"]
-            )
-            phonemized = "☐ " + self.phonemizer(text) + " ☐"
-            # if punctuations are not separated by spaces, add spaces
-            for symbol in self.punct_symbols:
-                phonemized = phonemized.replace(symbol, f" {symbol} ")
-            # replace any spaces more than 1 with 1 space
-            phonemized = re.sub(r"\s{2,}", " ", phonemized)
-            # remove 2 consecutive punctuations, or space and punctuation
-            phonemized_temp = []
-            phonemized_split = phonemized.split(" ")
-            for i in range(len(phonemized_split) - 1):
-                if (
-                    phonemized_split[i] == "☐"
-                    and phonemized_split[i + 1] in self.punct_symbols
-                ):
-                    continue
-                elif (
-                    phonemized_split[i] in self.punct_symbols
-                    and phonemized_split[i + 1] == "☐"
-                ):
-                    phonemized_split[i + 1] = phonemized_split[i]
-                else:
-                    phonemized_temp.append(phonemized_split[i])
-            phonemized_temp.append(phonemized_split[-1])
-            phonemized = " ".join(phonemized_temp)
-            phonemized_ids = []
+                mel = pad_or_trim(mel, N_FRAMES)
+                (
+                    emb,
+                    _,
+                ) = get_speaker_embedding(self.speaker_model, audio)
+                # pitch, energy, etc
+                pitch = get_pitch(audio, mel_len)
+                energy = get_energy(mel, mel_len)
+                assert len(pitch) == mel_len
+                assert len(energy) == mel_len
+                # pad to N_FRAMES (they are numpy arrays)
+                pitch = np.concatenate([pitch, np.zeros(N_FRAMES - len(pitch))])
+                energy = np.concatenate([energy, np.zeros(N_FRAMES - len(energy))])
+                try:
+                    snr = get_snr(audio)
+                except ValueError:
+                    snr = -1
+                try:
+                    srmr = get_srmr(audio, fast=True)
+                except ValueError:
+                    srmr = -1
+                # print(
+                #     f"SNR: {snr}, SRMR: {srmr}, pitch (mean): {pitch.mean()}, energy (mean): {energy.mean()}, pitch (std): {pitch.std()}, energy (std): {energy.std()}"
+                # )
+                phone_input = self.phone_processor(
+                    audio, return_tensors="pt", sampling_rate=SAMPLE_RATE
+                ).input_values
+                with torch.no_grad():
+                    logits = self.phone_model(phone_input).logits
+                phone_ids = torch.argmax(logits, dim=-1)[0].numpy()
+                # remove repeated phone_ids
+                phone_ids = resample_nearest(phone_ids, mel_len)
+                phone_ids = fill_sequence(phone_ids)
+                phone_start_end_idxs = []
+                phone_start = 0
+                for i in range(len(phone_ids) - 1):
+                    if phone_ids[i] != phone_ids[i + 1]:
+                        phone_start_end_idxs.append((phone_start, i + 1))
+                        phone_start = i + 1
+                phone_start_end_idxs.append((phone_start, len(phone_ids)))
+                # deduplicate phone_ids
+                phone_ids = [phone_ids[start] for start, _ in phone_start_end_idxs]
+                ctc_phones = " ".join(
+                    [self.id2phone[i] for i in phone_ids if self.id2phone[i] != "<pad>"]
+                )
+                phonemized = "☐ " + self.phonemizer(text) + " ☐"
+                # if punctuations are not separated by spaces, add spaces
+                for symbol in self.punct_symbols:
+                    phonemized = phonemized.replace(symbol, f" {symbol} ")
+                # replace any spaces more than 1 with 1 space
+                phonemized = re.sub(r"\s{2,}", " ", phonemized)
+                # remove 2 consecutive punctuations, or space and punctuation
+                phonemized_temp = []
+                phonemized_split = phonemized.split(" ")
+                for i in range(len(phonemized_split) - 1):
+                    if (
+                        phonemized_split[i] == "☐"
+                        and phonemized_split[i + 1] in self.punct_symbols
+                    ):
+                        continue
+                    elif (
+                        phonemized_split[i] in self.punct_symbols
+                        and phonemized_split[i + 1] == "☐"
+                    ):
+                        phonemized_split[i + 1] = phonemized_split[i]
+                    else:
+                        phonemized_temp.append(phonemized_split[i])
+                phonemized_temp.append(phonemized_split[-1])
+                phonemized = " ".join(phonemized_temp)
+                phonemized_ids = []
 
-            for phone in phonemized.split(" "):
-                if len(phone) > 0:
-                    if phone not in self.phone2id:
-                        if phone == "aɪʊɹ":
-                            phonemized_ids.extend(
-                                [
-                                    self.phone2id["aɪ"],
-                                    self.phone2id["ʊ"],
-                                    self.phone2id["ɹ"],
-                                ]
-                            )
-                            continue
-                        # find any substring of phone that is in phone2id
-                        for _ in range(4):
-                            found_substring = False
-                            for i in range(len(phone)):
-                                if phone[: len(phone) - i] in self.phone2id:
-                                    phonemized_ids.append(
-                                        self.phone2id[phone[: len(phone) - i]]
-                                    )
-                                    phone = phone[len(phone) - i :]
-                                    found_substring = True
-                                    break
-                            if not found_substring:
+                for phone in phonemized.split(" "):
+                    if len(phone) > 0:
+                        if phone not in self.phone2id:
+                            if phone == "aɪʊɹ":
+                                phonemized_ids.extend(
+                                    [
+                                        self.phone2id["aɪ"],
+                                        self.phone2id["ʊ"],
+                                        self.phone2id["ɹ"],
+                                    ]
+                                )
+                                continue
+                            # find any substring of phone that is in phone2id
+                            for _ in range(4):
+                                found_substring = False
                                 for i in range(len(phone)):
-                                    if phone[i:] in self.phone2id:
-                                        phonemized_ids.append(self.phone2id[phone[i:]])
-                                        phone = phone[:i]
+                                    if phone[: len(phone) - i] in self.phone2id:
+                                        phonemized_ids.append(
+                                            self.phone2id[phone[: len(phone) - i]]
+                                        )
+                                        phone = phone[len(phone) - i :]
                                         found_substring = True
                                         break
-                            if not found_substring:
-                                print(f"Could not find {phone} in phone2id")
-                                phonemized_ids.append(0)
-                            if len(phone) == 0:
-                                break
-                    else:
-                        phonemized_ids.append(self.phone2id[phone])
-            # align phonemized and phone_ids
-            alignments = pairwise2.align.globalxx(ctc_phones, phonemized, gap_char="+")
-            zipped = list(zip(alignments[0].seqA, alignments[0].seqB))
-            current_phone_idx = 0
-            new_phones = []
-            new_phone_start_end_idxs = []
-            last_phone = None
-            last_was_silence = False
-            current_phone = self.id2phone[phone_ids[current_phone_idx]]
-            silence_and_punct = "☐" + self.punct_symbols
-            for ctc, phone in zipped:
-                if ctc == "+" and phone in silence_and_punct:
-                    new_phones.append(phone)
-                    if last_phone is None:
-                        new_phone_start_end_idxs.append((0, 1))
-                        last_was_silence = True
-                    else:
-                        new_phone_start_end_idxs.append(
-                            (
-                                phone_start_end_idxs[current_phone_idx - 1][1],
-                                phone_start_end_idxs[current_phone_idx - 1][1] + 1,
-                            )
-                        )
-                        last_was_silence = True
-                elif current_phone.startswith(ctc):
-                    current_phone = current_phone.replace(ctc, "")
-                    if len(current_phone) == 0:
-                        last_phone = self.id2phone[phone_ids[current_phone_idx]]
-                        new_phones.append(last_phone)
-                        if last_was_silence:
+                                if not found_substring:
+                                    for i in range(len(phone)):
+                                        if phone[i:] in self.phone2id:
+                                            phonemized_ids.append(self.phone2id[phone[i:]])
+                                            phone = phone[:i]
+                                            found_substring = True
+                                            break
+                                if not found_substring:
+                                    print(f"Could not find {phone} in phone2id")
+                                    phonemized_ids.append(0)
+                                if len(phone) == 0:
+                                    break
+                        else:
+                            phonemized_ids.append(self.phone2id[phone])
+                # align phonemized and phone_ids
+                alignments = pairwise2.align.globalxx(ctc_phones, phonemized, gap_char="+")
+                zipped = list(zip(alignments[0].seqA, alignments[0].seqB))
+                current_phone_idx = 0
+                new_phones = []
+                new_phone_start_end_idxs = []
+                last_phone = None
+                last_was_silence = False
+                current_phone = self.id2phone[phone_ids[current_phone_idx]]
+                silence_and_punct = "☐" + self.punct_symbols
+                for ctc, phone in zipped:
+                    if ctc == "+" and phone in silence_and_punct:
+                        new_phones.append(phone)
+                        if last_phone is None:
+                            new_phone_start_end_idxs.append((0, 1))
+                            last_was_silence = True
+                        else:
                             new_phone_start_end_idxs.append(
                                 (
-                                    phone_start_end_idxs[current_phone_idx][0] + 1,
-                                    phone_start_end_idxs[current_phone_idx][1],
+                                    phone_start_end_idxs[current_phone_idx - 1][1],
+                                    phone_start_end_idxs[current_phone_idx - 1][1] + 1,
                                 )
                             )
-                        else:
-                            new_phone_start_end_idxs.append(
-                                phone_start_end_idxs[current_phone_idx]
-                            )
-                        last_was_silence = False
-                        current_phone_idx += 1
-                        if current_phone_idx < len(phone_ids):
-                            current_phone = self.id2phone[phone_ids[current_phone_idx]]
-                        else:
+                            last_was_silence = True
+                    elif current_phone.startswith(ctc):
+                        current_phone = current_phone.replace(ctc, "")
+                        if len(current_phone) == 0:
+                            last_phone = self.id2phone[phone_ids[current_phone_idx]]
+                            new_phones.append(last_phone)
+                            if last_was_silence:
+                                new_phone_start_end_idxs.append(
+                                    (
+                                        phone_start_end_idxs[current_phone_idx][0] + 1,
+                                        phone_start_end_idxs[current_phone_idx][1],
+                                    )
+                                )
+                            else:
+                                new_phone_start_end_idxs.append(
+                                    phone_start_end_idxs[current_phone_idx]
+                                )
+                            last_was_silence = False
+                            current_phone_idx += 1
+                            if current_phone_idx < len(phone_ids):
+                                current_phone = self.id2phone[phone_ids[current_phone_idx]]
+                            else:
+                                break
+                    else:
+                        pass
+                # add final silence
+                if new_phones[-1] not in silence_and_punct:
+                    new_phones.append("☐")
+                    new_phone_start_end_idxs.append(
+                        (
+                            phone_start_end_idxs[current_phone_idx - 1][1],
+                            phone_start_end_idxs[current_phone_idx - 1][1] + 1,
+                        )
+                    )
+                silences = get_silences(
+                    self.get_speech_timestamps, self.vad_model, audio, mel_len
+                )
+                # expand silences to include adjacent silences
+                for silence_start, silence_end in silences:
+                    # if there already is a silence token somewhere between the start and end
+                    # expand it, while reducing the sice of preceding and following phone to no less than 1
+                    current_idx = 0
+                    for i in range(current_idx, len(new_phone_start_end_idxs)):
+                        phone_start, phone_end = new_phone_start_end_idxs[i]
+                        if (
+                            silence_start <= phone_start
+                            and silence_end >= phone_end
+                            and new_phones[i] in silence_and_punct
+                        ):
+                            if i > 0:
+                                phone_before_sil = new_phone_start_end_idxs[i - 1]
+                                if phone_before_sil[0] < silence_start:
+                                    new_phone_start_end_idxs[i - 1] = (
+                                        phone_before_sil[0],
+                                        silence_start,
+                                    )
+                                else:
+                                    silence_start = phone_before_sil[0] + 2
+                                    new_phone_start_end_idxs[i - 1] = (
+                                        phone_before_sil[0],
+                                        silence_start,
+                                    )
+                            if i < len(new_phone_start_end_idxs) - 1:
+                                phone_after_sil = new_phone_start_end_idxs[i + 1]
+                                if phone_after_sil[1] > silence_end:
+                                    new_phone_start_end_idxs[i + 1] = (
+                                        silence_end,
+                                        phone_after_sil[1],
+                                    )
+                                else:
+                                    silence_end = phone_after_sil[1] - 2
+                                    new_phone_start_end_idxs[i + 1] = (
+                                        silence_end,
+                                        phone_after_sil[1],
+                                    )
+                            new_phone_start_end_idxs[i] = (silence_start, silence_end)
+                            current_idx = i + 1
                             break
-                else:
-                    pass
-            # add final silence
-            if new_phones[-1] not in silence_and_punct:
-                new_phones.append("☐")
-                new_phone_start_end_idxs.append(
-                    (
-                        phone_start_end_idxs[current_phone_idx - 1][1],
-                        phone_start_end_idxs[current_phone_idx - 1][1] + 1,
+
+                phone_spans = list(
+                    zip(
+                        new_phones,
+                        [(start, end) for start, end in new_phone_start_end_idxs],
                     )
                 )
-            silences = get_silences(
-                self.get_speech_timestamps, self.vad_model, audio, mel_len
-            )
-            # expand silences to include adjacent silences
-            for silence_start, silence_end in silences:
-                # if there already is a silence token somewhere between the start and end
-                # expand it, while reducing the sice of preceding and following phone to no less than 1
-                current_idx = 0
-                for i in range(current_idx, len(new_phone_start_end_idxs)):
-                    phone_start, phone_end = new_phone_start_end_idxs[i]
+                if phone_spans[0][1][0] < 0:
+                    phone_spans[0] = (
+                        phone_spans[0][0],
+                        (0, phone_spans[0][1][1]),
+                    )
+                if phone_spans[-1][1][1] > mel_len:
+                    phone_spans[-1] = (
+                        phone_spans[-1][0],
+                        (phone_spans[-1][1][0], mel_len),
+                    )
+                # remove duplicate silences
+                phone_spans_temp = []
+                prev_str = ""
+                # ';:,.!"?()-' ordered from least to most important for prosody
+                punct_importance_order = '?!.,";:-()'
+                for i in range(len(phone_spans) - 1):
                     if (
-                        silence_start <= phone_start
-                        and silence_end >= phone_end
-                        and new_phones[i] in silence_and_punct
+                        phone_spans[i][0] in silence_and_punct
+                        and phone_spans[i + 1][0] in silence_and_punct
                     ):
-                        if i > 0:
-                            phone_before_sil = new_phone_start_end_idxs[i - 1]
-                            if phone_before_sil[0] < silence_start:
-                                new_phone_start_end_idxs[i - 1] = (
-                                    phone_before_sil[0],
-                                    silence_start,
-                                )
-                            else:
-                                silence_start = phone_before_sil[0] + 2
-                                new_phone_start_end_idxs[i - 1] = (
-                                    phone_before_sil[0],
-                                    silence_start,
-                                )
-                        if i < len(new_phone_start_end_idxs) - 1:
-                            phone_after_sil = new_phone_start_end_idxs[i + 1]
-                            if phone_after_sil[1] > silence_end:
-                                new_phone_start_end_idxs[i + 1] = (
-                                    silence_end,
-                                    phone_after_sil[1],
-                                )
-                            else:
-                                silence_end = phone_after_sil[1] - 2
-                                new_phone_start_end_idxs[i + 1] = (
-                                    silence_end,
-                                    phone_after_sil[1],
-                                )
-                        new_phone_start_end_idxs[i] = (silence_start, silence_end)
-                        current_idx = i + 1
-                        break
-
-            phone_spans = list(
-                zip(
-                    new_phones,
-                    [(start, end) for start, end in new_phone_start_end_idxs],
-                )
-            )
-            if phone_spans[0][1][0] < 0:
-                phone_spans[0] = (
-                    phone_spans[0][0],
-                    (0, phone_spans[0][1][1]),
-                )
-            if phone_spans[-1][1][1] > mel_len:
-                phone_spans[-1] = (
-                    phone_spans[-1][0],
-                    (phone_spans[-1][1][0], mel_len),
-                )
-            # remove duplicate silences
-            phone_spans_temp = []
-            prev_str = ""
-            # ';:,.!"?()-' ordered from least to most important for prosody
-            punct_importance_order = '?!.,";:-()'
-            for i in range(len(phone_spans) - 1):
-                if (
-                    phone_spans[i][0] in silence_and_punct
-                    and phone_spans[i + 1][0] in silence_and_punct
-                ):
-                    prev_str += phone_spans[i][0]
-                else:
-                    if prev_str != "":
                         prev_str += phone_spans[i][0]
-                        # get the most important punctuation
-                        most_important_punct = None
-                        for symbol in punct_importance_order:
-                            if symbol in prev_str:
-                                most_important_punct = symbol
-                                break
-                        if most_important_punct is None:
-                            most_important_punct = "☐"
-                        new_start = phone_spans[i - len(prev_str) + 1][1][0]
-                        new_end = phone_spans[i][1][1]
-                        phone_spans_temp.append(
-                            (
-                                most_important_punct,
-                                (new_start, new_end),
-                            )
-                        )
                     else:
-                        phone_spans_temp.append(phone_spans[i])
-                    prev_str = ""
-            phone_spans_temp.append(phone_spans[-1])
-            phone_spans = phone_spans_temp
+                        if prev_str != "":
+                            prev_str += phone_spans[i][0]
+                            # get the most important punctuation
+                            most_important_punct = None
+                            for symbol in punct_importance_order:
+                                if symbol in prev_str:
+                                    most_important_punct = symbol
+                                    break
+                            if most_important_punct is None:
+                                most_important_punct = "☐"
+                            new_start = phone_spans[i - len(prev_str) + 1][1][0]
+                            new_end = phone_spans[i][1][1]
+                            phone_spans_temp.append(
+                                (
+                                    most_important_punct,
+                                    (new_start, new_end),
+                                )
+                            )
+                        else:
+                            phone_spans_temp.append(phone_spans[i])
+                        prev_str = ""
+                phone_spans_temp.append(phone_spans[-1])
+                phone_spans = phone_spans_temp
 
-            result["phone_spans"].append(phone_spans)
-            result["mel"].append(mel)
-            result["mel_len"].append(mel_len)
-            result["pitch"].append(pitch)
-            result["energy"].append(energy)
-            result["attributes"].append(
-                [snr, srmr, pitch.mean(), pitch.std(), energy.mean(), energy.std()]
+                result["phone_spans"].append(phone_spans)
+                result["mel"].append(mel)
+                result["mel_len"].append(mel_len)
+                result["pitch"].append(pitch)
+                result["energy"].append(energy)
+                result["attributes"].append(
+                    [snr, srmr, pitch.mean(), pitch.std(), energy.mean(), energy.std()]
+                )
+                result["speaker_emb"].append(emb)
+                result["transcript"].append(text)
+
+                phonemized_ids_cond = resample_nearest(
+                    np.array(phonemized_ids), mel_len
+                ).tolist()
+                phonemized_ids_cond = phonemized_ids_cond + [0] * (
+                    N_FRAMES - len(phonemized_ids_cond)
+                )
+                result["transcript_phonemized_cond"].append(phonemized_ids_cond)
+
+                phoneme_len = len(phonemized_ids)
+                if phoneme_len > self.phone_len:
+                    transcript_mask = [1] * self.phone_len
+                else:
+                    transcript_mask = [1] * phoneme_len + [0] * (self.phone_len - phoneme_len)
+                result["transcript_mask"].append(transcript_mask)
+                phonemized_ids = phonemized_ids + [0] * (
+                    self.phone_len - len(phonemized_ids)
+                )  # pad phonemized_ids to phone_len
+                phonemized_ids = phonemized_ids[: self.phone_len]
+                result["transcript_phonemized"].append(phonemized_ids)
+
+                result["silences"].append(silences)
+                # convert phone_spans to phone_ids
+                phone_ids = []
+                i = 0
+                for phone, (start, end) in phone_spans:
+                    if i > 0:
+                        if start != phone_spans[i - 1][1][1]:
+                            print(f"start {start} != {phone_spans[i - 1][1][1]}", phone)
+                    if i < len(phone_spans) - 1:
+                        if end != phone_spans[i + 1][1][0]:
+                            print(f"end {end} != {phone_spans[i + 1][1][0]}", phone)
+                    i += 1
+                    try:
+                        phone_ids.extend([self.phone2id[phone]] * (end - start))
+                    except KeyError:
+                        print(result)
+                        print(f"KeyError: {phone}")
+                        raise
+                if len(phone_ids) < N_FRAMES:
+                    # pad phone_ids to mel_len
+                    phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
+                result["phone_ids"].append(phone_ids)
+                result["loss_mask"].append(loss_mask)
+            result["mel"] = torch.stack(result["mel"])
+            result["mel_len"] = torch.tensor(result["mel_len"])
+            result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)
+            result["phone_ids"] = torch.tensor(result["phone_ids"])
+            result["transcript_phonemized"] = torch.tensor(result["transcript_phonemized"])
+            result["transcript_mask"] = torch.tensor(result["transcript_mask"])
+            result["transcript_phonemized_cond"] = torch.tensor(
+                result["transcript_phonemized_cond"]
             )
-            result["speaker_emb"].append(emb)
-            result["transcript"].append(text)
-
-            phonemized_ids_cond = resample_nearest(
-                np.array(phonemized_ids), mel_len
-            ).tolist()
-            phonemized_ids_cond = phonemized_ids_cond + [0] * (
-                N_FRAMES - len(phonemized_ids_cond)
-            )
-            result["transcript_phonemized_cond"].append(phonemized_ids_cond)
-
-            phonemized_ids = phonemized_ids + [0] * (
-                self.phone_len - len(phonemized_ids)
-            )  # pad phonemized_ids to phone_len
-            phonemized_ids = phonemized_ids[: self.phone_len]
-            result["transcript_phonemized"].append(phonemized_ids)
-
-            result["silences"].append(silences)
-            # convert phone_spans to phone_ids
-            phone_ids = []
-            i = 0
-            for phone, (start, end) in phone_spans:
-                if i > 0:
-                    if start != phone_spans[i - 1][1][1]:
-                        print(f"start {start} != {phone_spans[i - 1][1][1]}", phone)
-                if i < len(phone_spans) - 1:
-                    if end != phone_spans[i + 1][1][0]:
-                        print(f"end {end} != {phone_spans[i + 1][1][0]}", phone)
-                i += 1
-                try:
-                    phone_ids.extend([self.phone2id[phone]] * (end - start))
-                except KeyError:
-                    print(result)
-                    print(f"KeyError: {phone}")
-                    raise
-            if len(phone_ids) < N_FRAMES:
-                # pad phone_ids to mel_len
-                phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
-            result["phone_ids"].append(phone_ids)
-            result["loss_mask"].append(loss_mask)
-        result["mel"] = torch.stack(result["mel"])
-        result["mel_len"] = torch.tensor(result["mel_len"])
-        result["speaker_emb"] = torch.stack(result["speaker_emb"]).squeeze(1)
-        result["phone_ids"] = torch.tensor(result["phone_ids"])
-        result["transcript_phonemized"] = torch.tensor(result["transcript_phonemized"])
-        result["transcript_phonemized_cond"] = torch.tensor(
-            result["transcript_phonemized_cond"]
-        )
-        result["pitch"] = torch.tensor(np.array(result["pitch"]))
-        result["energy"] = torch.tensor(np.array(result["energy"]))
-        result["attributes"] = torch.tensor(result["attributes"])
-        result["loss_mask"] = torch.stack(result["loss_mask"])
+            result["pitch"] = torch.tensor(np.array(result["pitch"]))
+            result["energy"] = torch.tensor(np.array(result["energy"]))
+            result["attributes"] = torch.tensor(result["attributes"])
+            result["loss_mask"] = torch.stack(result["loss_mask"])
+        except Exception as e:
+            print(f"Exception: {e} for {result}")
+            return None
         return result

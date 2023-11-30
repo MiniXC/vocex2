@@ -9,4 +9,4 @@ pip install k2==1.24.3.dev20230719+cpu.torch1.13.1 -f https://k2-fsa.github.io/k
 pip install -r requirements.txt
 ```
 
-python3 scripts/train.py --freeze_whisper=False --from_whisper="base.en" --wandb_mode=online --run_name "base_new_cond"
+python3 scripts/train.py --freeze_whisper=False --from_whisper="base.en" --wandb_mode=online --run_name "base_cross"
