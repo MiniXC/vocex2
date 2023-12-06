@@ -29,7 +29,7 @@ from rich.console import Console
 
 # plotting
 import matplotlib.pyplot as plt
-from util.plotting import plot_first_batch, plot_predictions, plot_item
+from util.plotting import plot_first_batch, plot_predictions, plot_item, get_phone_spans
 
 console = Console()
 
@@ -85,7 +85,7 @@ def train_epoch(epoch):
         phone_mask = batch["transcript_mask"]
 
         # 25% of the time, mask out parts of the mel to encourage the model to learn from the phone condition
-        if np.random.rand() < 0.25:
+        if np.random.rand() < 0:
             mel_mask = torch.rand((mel_input.shape[0], mel_input.shape[2])) > 0.5
             mel_mask = mel_mask.unsqueeze(1).repeat(1, mel_input.shape[1], 1)
             mel_input = mel_input * mel_mask
@@ -209,6 +209,7 @@ def evaluate(device="cpu"):
         attribute_losses = []
         pitch_losses = []
         energy_losses = []
+        boundary_mae = []
         console_rule("Evaluation")
         for i in tqdm(range(10), desc="eval"):
             bs = training_args.batch_size
@@ -280,7 +281,6 @@ def evaluate(device="cpu"):
                 )
                 for item in phone_pred_new
             ]
-            print(phone_pred)
             for j in range(bs):
                 if i == 0 and j == 0:
                     fig = plot_item(
@@ -306,6 +306,17 @@ def evaluate(device="cpu"):
                         },
                         step=global_step,
                     )
+                pred_phone_spans = get_phone_spans(phone_pred[j], collator.id2phone)
+                real_phone_spans = batch["phone_spans"][j]
+                # calculate mae between predicted and real phone boundaries
+                boundary_mae.append(
+                    np.mean(
+                        [
+                            np.abs(x[1][0] - y[1][0])
+                            for x, y in zip(pred_phone_spans, real_phone_spans)
+                        ]
+                    )
+                )
                 y_pred.append(phone_pred[j])
                 y_true.append(phone_ids[j])
                 # convert to strings for cer
@@ -346,11 +357,13 @@ def evaluate(device="cpu"):
         attribute_loss = np.mean(attribute_losses)
         pitch_loss = np.mean(pitch_losses)
         energy_loss = np.mean(energy_losses)
+        boundary_mae = np.mean(boundary_mae)
         wandb_log(
             "val",
             {
                 "cer": cer.item(),
                 "cer_transcript": cer_transcript.item(),
+                "boundary_mae": boundary_mae,
                 "acc": acc,
                 "f1": f1,
                 "precision": precision,
@@ -457,7 +470,7 @@ def main():
     )
     # move 10 randomly selected speakers to val_ds
     speaker_ids = data["speaker_id"].unique()
-    np.random.seed(training_args.seed)
+    np.random.seed(0)
     val_speaker_ids = np.random.choice(speaker_ids, 10, replace=False)
     val_ds = data[data["speaker_id"].isin(val_speaker_ids)]
     train_ds = data.drop(val_ds.index)
@@ -467,6 +480,8 @@ def main():
     console_print(f"[green]dataset path[/green]: {training_args.libriheavy_path}")
     console_print(f"[green]train_split size[/green]: {len(train_ds)}")
     console_print(f"[green]val_split size[/green]: {len(val_ds)}")
+
+    np.random.seed(training_args.seed)
 
     train_ds = DatasetFromDataframe(train_ds)
     val_ds = DatasetFromDataframe(val_ds)

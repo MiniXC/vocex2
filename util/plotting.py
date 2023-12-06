@@ -37,8 +37,7 @@ def plot_first_batch(batch, args: TrainingArgs):
         fig.savefig(f"figures/batch_{i}.png")
 
 
-def plot_predictions(mel, mel_len, pred_phone_ids, id2phone, args: TrainingArgs):
-    # convert phone_ids to phone_spans
+def get_phone_spans(pred_phone_ids, id2phone):
     phone_spans = []
     start = 0
     if isinstance(pred_phone_ids, torch.Tensor):
@@ -56,5 +55,10 @@ def plot_predictions(mel, mel_len, pred_phone_ids, id2phone, args: TrainingArgs)
     phone_spans = [
         [id2phone[phone_id], (start, end)] for phone_id, start, end in phone_spans
     ]
+    return phone_spans
+
+def plot_predictions(mel, mel_len, pred_phone_ids, id2phone, args: TrainingArgs):
+    # convert phone_ids to phone_spans
+    phone_spans = get_phone_spans(pred_phone_ids, id2phone)
     fig = plot_item(mel, phone_spans, mel_len, args)
     return fig

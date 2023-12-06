@@ -180,7 +180,6 @@ class FrameProsodyMLP(nn.Module):
         x = self.mlp(x)
         return x
 
-
 class WhisperAudioEncoder(nn.Module):
     def __init__(
         self,
@@ -243,6 +242,8 @@ class WhisperAudioEncoder(nn.Module):
         self.ln_phone = LayerNorm(n_state)
 
         self.phone_out = Linear(n_state, args.n_phones)
+
+        self.ctc_topo = k2.ctc_topo(403, modified=True)
 
         self.apply(self._init_weights)
 
@@ -329,6 +330,47 @@ class WhisperAudioEncoder(nn.Module):
             "attributes": attributes,
         }
 
+    def _get_ctc_graph(self, targets, skip=False):
+        graphs = []
+        if not skip:
+            for linear in targets:
+                f_arc = []
+                f_aux = []
+                for i, x in enumerate(linear):
+                    f_arc.append([i, i+1, x, 0])
+                    f_aux.append(x)
+                f_arc.append([len(linear), len(linear)+1, -1, 0])
+                f_aux.append(-1)
+                linear_graph = k2.Fsa(
+                    torch.tensor(f_arc).to(torch.int32),
+                    torch.tensor(f_aux)
+                )
+                graph = k2.compose(self.ctc_topo, linear_graph)
+                graphs.append(graph)
+        else:
+            # same as above, but we allow for skipping of phones - this is used for decoding
+            # the cost for skipping is increased by a factor of 2     
+            for linear in targets:
+                f_arc = []
+                f_aux = []
+                for i, x in enumerate(linear):
+                    f_arc.append([i, i+1, x, 0])
+                    f_aux.append(x)
+                    if i < len(linear) - 1:
+                        f_arc.append([i, i+2, x, 0])
+                        f_aux.append(x)
+
+                f_arc.append([len(linear), len(linear)+1, -1, 0])
+                f_aux.append(-1)
+                linear_graph = k2.Fsa(
+                    torch.tensor(f_arc).to(torch.int32),
+                    torch.tensor(f_aux)
+                )
+                graph = k2.compose(self.ctc_topo, linear_graph)
+                graphs.append(graph)
+        return k2.create_fsa_vec(graphs)
+            
+
     def decode(self, log_prob, log_prob_len, targets):
         """
         Align targets to log_probs.
@@ -358,23 +400,32 @@ class WhisperAudioEncoder(nn.Module):
         assert isinstance(targets[0], list)
         assert log_prob.shape[0] == len(targets)
 
-        log_prob = torch.log_softmax(log_prob, dim=-1)
-
-        N, T, C = log_prob.shape
-
         from time import time
 
         start = time()
+        
+        # add blank symbol to log_prob
+        log_prob = torch.cat([torch.ones_like(log_prob[:, :, :1])*-20, log_prob], dim=-1)
 
-        graph = k2.ctc_graph(targets, modified=True)
+        # add 1 to each target
+        targets = [[x+1 for x in target] for target in targets]
+
+        N, T, C = log_prob.shape
+
+        # log softmax
+        log_prob = F.log_softmax(log_prob, dim=-1)
+
+        graph = k2.ctc_graph(targets, modified=False)
+        # graph = self._get_ctc_graph(targets, skip=True)
 
         lattice = k2.get_lattice(
             log_prob=log_prob,
             log_prob_len=log_prob_len,
             decoding_graph=graph,
         )
-
+ 
         best_path = k2.shortest_path(lattice, use_double_scores=True)
+        # best_path = k2.one_best_decoding(lattice, use_double_scores=True)
         labels = best_path.labels
 
         alignments = []
@@ -384,7 +435,7 @@ class WhisperAudioEncoder(nn.Module):
                 alignments.append(alignment)
                 alignment = []
             else:
-                alignment.append(e)
+                alignment.append(e-1)
 
         print(f"decode time: {time() - start:.3f}s")
 

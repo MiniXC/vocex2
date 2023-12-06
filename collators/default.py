@@ -42,6 +42,7 @@ from .srmr import get_srmr
 
 
 N_MELS = 80
+N_PHONES = 500
 
 
 def get_speech_timestamps(
@@ -279,6 +280,13 @@ def load_audio(file, start, duration, sr=SAMPLE_RATE):
         raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
+    # torchaudio version
+    # audio, _ = torchaudio.load(file)
+    # audio = audio / torch.max(torch.abs(audio))
+    # audio = audio.numpy().flatten().astype(np.float32)
+    # audio = audio[int(start * sr) : int((start + duration) * sr)]
+    # return audio
+
 
 def resample_nearest(array, new_length):
     indices = np.linspace(0, len(array) - 1, new_length)
@@ -452,6 +460,8 @@ class VocexCollator(nn.Module):
             "energy": [],
             "attributes": [],  # snr, srmr, pitch mean, pitch std, energy mean, energy std
             "loss_mask": [],
+            "start_idx": [],
+            "duration": [],
         }
         try:
             for item in batch:
@@ -773,7 +783,6 @@ class VocexCollator(nn.Module):
                 )  # pad phonemized_ids to phone_len
                 phonemized_ids = phonemized_ids[: self.phone_len]
                 result["transcript_phonemized"].append(phonemized_ids)
-
                 result["silences"].append(silences)
                 # convert phone_spans to phone_ids
                 phone_ids = []
@@ -795,6 +804,17 @@ class VocexCollator(nn.Module):
                 if len(phone_ids) < N_FRAMES:
                     # pad phone_ids to mel_len
                     phone_ids = phone_ids + [0] * (N_FRAMES - len(phone_ids))
+                # start_idx and duration can be created from phone_spans
+                start_idx = []
+                duration = []
+                for phone, (start, end) in phone_spans:
+                    start_idx.append(start)
+                    duration.append(end - start)
+                # pad start_idx and duration to N_PHONES
+                start_idx = start_idx + [0] * (N_PHONES - len(start_idx))
+                duration = duration + [0] * (N_PHONES - len(duration))
+                result["start_idx"].append(start_idx)
+                result["duration"].append(duration)
                 result["phone_ids"].append(phone_ids)
                 result["loss_mask"].append(loss_mask)
             result["mel"] = torch.stack(result["mel"])
@@ -810,6 +830,8 @@ class VocexCollator(nn.Module):
             result["energy"] = torch.tensor(np.array(result["energy"]))
             result["attributes"] = torch.tensor(result["attributes"])
             result["loss_mask"] = torch.stack(result["loss_mask"])
+            result["start_idx"] = torch.tensor(result["start_idx"])
+            result["duration"] = torch.tensor(result["duration"])
         except Exception as e:
             print(f"Exception: {e} for {result}")
             return None
